@@ -17,8 +17,10 @@ from dotenv import load_dotenv
 # إعداد اللوجات
 # ===========================
 logging.basicConfig(
-    level=logging.DEBUG,  # ← تفعيل أعلى مستوى Debug
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()]
 )(
     level=logging.INFO,
