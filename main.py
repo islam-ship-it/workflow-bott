@@ -64,8 +64,8 @@ message_timers = {}        # user_id -> threading.Timer
 queue_lock = threading.Lock()   # لحماية pending_messages و message_timers
 run_locks = {}             # user_id -> threading.Lock() يمنع أكثر من run واحد لنفس المستخدم
 
-BATCH_WAIT_TIME = 4.0      # تم رفعها إلى 4 ثواني بعد طلبك
-RETRY_DELAY_WHEN_BUSY = 1.0  # ثانية لإعادة المحاولة لو فيه run شغال
+BATCH_WAIT_TIME = 9.0      # تم رفعها إلى 4 ثواني بعد طلبك
+RETRY_DELAY_WHEN_BUSY = 3.0  # ثانية لإعادة المحاولة لو فيه run شغال
 
 # ===========================
 # دوال مساعدة لإدارة السيشن
