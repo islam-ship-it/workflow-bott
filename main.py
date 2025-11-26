@@ -12,6 +12,7 @@ from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+import subprocess
 
 # ===========================
 # إعداد اللوجات بالعربي
@@ -79,7 +80,11 @@ def get_or_create_session_from_contact(contact_data, platform):
     session = sessions_collection.find_one({"_id": user_id})
     now_utc = datetime.now(timezone.utc)
 
-    main_platform = "Instagram" if "instagram" in (contact_data.get("source","").lower()) else "Facebook"
+    # ManyChat يرسل حقل "source" الذي يحتوي على "instagram" أو "facebook"
+    source_lower = contact_data.get("source", "").lower()
+    main_platform = "Instagram" if "instagram" in source_lower else "Facebook"
+    # إضافة حقل جديد لتخزين مصدر الرسالة
+    contact_data["platform_source"] = main_platform
 
     if session:
         sessions_collection.update_one(
@@ -87,6 +92,7 @@ def get_or_create_session_from_contact(contact_data, platform):
             {"$set": {
                 "last_contact_date": now_utc,
                 "platform": main_platform,
+                "platform_source": main_platform, # تحديث حقل مصدر المنصة
                 "profile.name": contact_data.get("name"),
                 "profile.profile_pic": contact_data.get("profile_pic"),
                 "status": "active"
@@ -97,6 +103,7 @@ def get_or_create_session_from_contact(contact_data, platform):
     new_session = {
         "_id": user_id,
         "platform": main_platform,
+        "platform_source": main_platform, # إضافة حقل مصدر المنصة للجلسة الجديدة
         "profile": {
             "name": contact_data.get("name"),
             "first_name": contact_data.get("first_name"),
@@ -118,6 +125,21 @@ def get_or_create_session_from_contact(contact_data, platform):
 # ===========================
 # Vision + Whisper
 # ===========================
+def upload_file_to_url(file_path):
+    try:
+        # استخدام أداة manus-upload-file لرفع الملف والحصول على رابط عام
+        result = subprocess.run(
+            ["manus-upload-file", file_path],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        # الرابط العام هو آخر سطر في الإخراج
+        return result.stdout.strip().split('\n')[-1]
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ فشل رفع الملف: {e.stderr}")
+        return None
+
 async def get_image_description_for_assistant(base64_image):
     logger.info("🖼️ معالجة صورة...")
     try:
@@ -219,9 +241,10 @@ def send_manychat_reply(subscriber_id, text_message, platform):
         return
 
     # الإصلاح النهائي:
-    # ManyChat يستخدم /fb/ لإرسال رسائل FB + IG معًا
-    channel = "facebook"
-    url = "https://api.manychat.com/fb/sending/sendContent"
+	    # ManyChat يستخدم /fb/ لإرسال رسائل FB + IG معًا، ولكن يمكن تحديد القناة في حمولة الـ webhook
+	    # ملاحظة: ManyChat API v2 يستخدم "facebook" كقناة موحدة لـ FB و IG
+	    channel = "facebook"
+	    url = "https://api.manychat.com/fb/sending/sendContent"
 
     payload = {
         "subscriber_id": str(subscriber_id),
@@ -277,10 +300,22 @@ def schedule_assistant_response(user_id):
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        reply = loop.run_until_complete(get_assistant_reply_async(session, merged))
-        loop.close()
-
-        send_manychat_reply(user_id, reply, session["platform"])
+	        reply = loop.run_until_complete(get_assistant_reply_async(session, merged))
+	        loop.close()
+	
+	        # حفظ رد المساعد في سجل المحادثات
+	        sessions_collection.update_one(
+	            {"_id": user_id},
+	            {"$push": {
+	                "history": {
+	                    "role": "assistant",
+	                    "content": reply,
+	                    "timestamp": datetime.now(timezone.utc)
+	                }
+	            }}
+	        )
+	
+	        send_manychat_reply(user_id, reply, session["platform"])
 
     finally:
         lock.release()
@@ -292,10 +327,22 @@ def add_to_queue(session, text):
     uid = session["_id"]
 
     with queue_lock:
-        if uid not in pending_messages:
-            pending_messages[uid] = {"texts": [], "session": session}
+	    if uid not in pending_messages:
+	        pending_messages[uid] = {"texts": [], "session": session}
 
-        pending_messages[uid]["texts"].append(text)
+	    pending_messages[uid]["texts"].append(text)
+	    
+	    # حفظ رسالة المستخدم في سجل المحادثات
+	    sessions_collection.update_one(
+	        {"_id": uid},
+	        {"$push": {
+	            "history": {
+	                "role": "user",
+	                "content": text,
+	                "timestamp": datetime.now(timezone.utc)
+	            }
+	        }}
+	    )
 
         if uid in message_timers:
             message_timers[uid].cancel()
@@ -319,18 +366,115 @@ def mc_webhook():
 
     session = get_or_create_session_from_contact(contact, "ManyChat")
 
+    # استخراج النص والوسائط
     txt = contact.get("last_text_input") or contact.get("last_input_text")
+    media_url = data.get("media_url") # افتراض أن ManyChat يرسل media_url مباشرة في حمولة الـ webhook
+
+    message_content = []
+
+    # 1. معالجة الوسائط (الصورة)
+    if media_url:
+        logger.info(f"🖼️ تم استلام وسائط: {media_url}")
+        
+        # تحميل محتوى الوسائط
+        media_content = download_media_from_url(media_url)
+        
+        if media_content:
+            # حفظ الوسائط مؤقتًا
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(media_content)
+                path = tmp.name
+            
+            # رفع الملف للحصول على رابط عام
+            public_url = upload_file_to_url(path)
+            os.remove(path) # حذف الملف المؤقت
+            
+            if public_url:
+                # إضافة الرابط العام إلى محتوى الرسالة للمساعد
+                message_content.append(f"[صورة مرفقة: {public_url}]")
+                logger.info(f"✅ تم تحويل الصورة إلى رابط: {public_url}")
+            else:
+                logger.warning("⚠️ فشل الحصول على رابط عام للصورة.")
+        else:
+            logger.warning("⚠️ فشل تحميل محتوى الوسائط.")
+
+    # 2. معالجة النص
     if txt:
-        add_to_queue(session, txt)
+        message_content.append(txt)
+
+    # 3. إرسال المحتوى المدمج إلى قائمة الانتظار
+    if message_content:
+        merged_content = "\n".join(message_content)
+        add_to_queue(session, merged_content)
+        logger.info(f"✉️ إرسال المحتوى المدمج للمساعد: {merged_content}")
+
+    return jsonify({"ok": True}), 200
 
     return jsonify({"ok": True}), 200
 
 # ===========================
 # Home
 # ===========================
-@app.route("/")
-def home():
-    return "Bot running V3 Final – عربي"
+	@app.route("/")
+	def home():
+	    return "Bot running V3 Final – عربي"
+	
+	# ===========================
+	# طباعة المحادثات
+	# ===========================
+	@app.route("/print_history/<user_id>", methods=["GET"])
+	def print_history(user_id):
+	    session = sessions_collection.find_one({"_id": user_id})
+	
+	    if not session:
+	        return f"لا يوجد سجل محادثات للمستخدم: {user_id}", 404
+	
+	    history = session.get("history", [])
+	    
+	    if not history:
+	        return f"سجل المحادثات فارغ للمستخدم: {user_id}", 200
+	
+	    # تنسيق المحادثة في HTML لسهولة الطباعة
+	    html_content = f"""
+	    <!DOCTYPE html>
+	    <html lang="ar" dir="rtl">
+	    <head>
+	        <meta charset="UTF-8">
+	        <title>سجل المحادثات للمستخدم {user_id}</title>
+	        <style>
+	            body {{ font-family: 'Arial', sans-serif; line-height: 1.6; padding: 20px; direction: rtl; }}
+	            .message {{ margin-bottom: 15px; padding: 10px; border-radius: 8px; }}
+	            .user {{ background-color: #e6f7ff; border-left: 5px solid #1890ff; }}
+	            .assistant {{ background-color: #f6ffed; border-right: 5px solid #52c41a; text-align: right; }}
+	            .role {{ font-weight: bold; margin-bottom: 5px; }}
+	            .timestamp {{ font-size: 0.8em; color: #8c8c8c; }}
+	            .content {{ white-space: pre-wrap; }}
+	            h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+	        </style>
+	    </head>
+	    <body>
+	        <h1>سجل المحادثات</h1>
+	        <p><strong>معرف المستخدم:</strong> {user_id}</p>
+	        <p><strong>المنصة:</strong> {session.get("platform_source", "غير محدد")}</p>
+	        <p><strong>الاسم:</strong> {session.get("profile", {}).get("name", "غير متوفر")}</p>
+	        <hr>
+	    """
+	
+	    for msg in history:
+	        role = "المستخدم" if msg["role"] == "user" else "المساعد"
+	        css_class = "user" if msg["role"] == "user" else "assistant"
+	        timestamp = msg["timestamp"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(msg["timestamp"], datetime) else str(msg["timestamp"])
+	        
+	        html_content += f"""
+	        <div class="message {css_class}">
+	            <div class="role">{role} <span class="timestamp">({timestamp})</span></div>
+	            <div class="content">{msg["content"]}</div>
+	        </div>
+	        """
+	
+	    html_content += "</body></html>"
+	
+	    return html_content, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 # ===========================
 # Run
