@@ -1,5 +1,4 @@
 import os
-import time
 import json
 import requests
 import threading
@@ -14,81 +13,88 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # ===========================
-# إعداد اللوجات بالعربي
+# LOGGING بالعربي
 # ===========================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
 logger.info("▶️ بدء تشغيل التطبيق...")
 
 # ===========================
-# تحميل الإعدادات من .env
+# تحميل الإعدادات
 # ===========================
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
-
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 
 # ===========================
-# اتصال بقاعدة البيانات
+# اتصال MongoDB
 # ===========================
 try:
     client_db = MongoClient(MONGO_URI)
     db = client_db["multi_platform_bot"]
     sessions_collection = db["sessions"]
-    logger.info("✅ متصل بقاعدة البيانات")
+    logger.info("✅ تم الاتصال بقاعدة البيانات")
 except Exception as e:
     logger.error(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
     raise
 
 # ===========================
-# إعداد Flask و OpenAI
+# Flask + OpenAI
 # ===========================
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 Flask و OpenAI جاهزين")
 
 # ===========================
-# متغيرات التحكم
+# GLOBAL QUEUE + LOCKS
 # ===========================
-pending_messages = {}
-message_timers = {}
+pending_messages = {}      # user_id → {texts:[], session:{}}
+message_timers = {}        # user_id → Timer
 queue_lock = threading.Lock()
-run_locks = {}
+run_locks = {}             # user_id → threading.Lock()
 
 BATCH_WAIT_TIME = 9.0
-RETRY_DELAY_WHEN_BUSY = 3.0
+RETRY_DELAY = 3.0
 
 # ===========================
-# السيشن
+# معرفة المنصة الفعلية
 # ===========================
-def get_or_create_session_from_contact(contact_data, platform):
-    user_id = str(contact_data.get("id"))
-    if not user_id:
-        logger.error("❌ user_id غير موجود")
-        return None
+def detect_platform(contact):
+    source = (contact.get("source") or "").lower()
+
+    if "ig" in source or "instagram" in source:
+        return "Instagram"
+
+    if "fb" in source or "facebook" in source:
+        return "Facebook"
+
+    return "Facebook"
+
+# ===========================
+# إدارة السيشن
+# ===========================
+def get_or_create_session(contact):
+    user_id = str(contact.get("id"))
+
+    platform = detect_platform(contact)
+    now = datetime.now(timezone.utc)
 
     session = sessions_collection.find_one({"_id": user_id})
-    now_utc = datetime.now(timezone.utc)
-
-    main_platform = "Instagram" if "instagram" in (contact_data.get("source","").lower()) else "Facebook"
-
     if session:
         sessions_collection.update_one(
             {"_id": user_id},
             {"$set": {
-                "last_contact_date": now_utc,
-                "platform": main_platform,
-                "profile.name": contact_data.get("name"),
-                "profile.profile_pic": contact_data.get("profile_pic"),
+                "last_contact_date": now,
+                "platform": platform,
+                "profile.name": contact.get("name"),
+                "profile.pic": contact.get("profile_pic"),
                 "status": "active"
             }}
         )
@@ -96,20 +102,15 @@ def get_or_create_session_from_contact(contact_data, platform):
 
     new_session = {
         "_id": user_id,
-        "platform": main_platform,
+        "platform": platform,
         "profile": {
-            "name": contact_data.get("name"),
-            "first_name": contact_data.get("first_name"),
-            "last_name": contact_data.get("last_name"),
-            "profile_pic": contact_data.get("profile_pic"),
+            "name": contact.get("name"),
+            "pic": contact.get("profile_pic"),
         },
         "openai_thread_id": None,
-        "custom_fields": contact_data.get("custom_fields", {}),
-        "tags": [f"source:{main_platform.lower()}"],
         "status": "active",
-        "conversation_summary": "",
-        "first_contact_date": now_utc,
-        "last_contact_date": now_utc
+        "first_contact_date": now,
+        "last_contact_date": now
     }
     sessions_collection.insert_one(new_session)
     logger.info(f"🆕 إنشاء جلسة جديدة للمستخدم {user_id}")
@@ -118,66 +119,57 @@ def get_or_create_session_from_contact(contact_data, platform):
 # ===========================
 # Vision + Whisper
 # ===========================
-async def get_image_description_for_assistant(base64_image):
-    logger.info("🖼️ معالجة صورة...")
+async def get_image_description(base64_img):
     try:
-        response = await asyncio.to_thread(
+        res = await asyncio.to_thread(
             client.chat.completions.create,
             model="gpt-4.1",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "اقرأ محتوى الصورة بدقة."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]
-            }],
-            max_tokens=300
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "اقرأ محتوى الصورة بدقة."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                    ]
+                }
+            ]
         )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"❌ خطأ معالجة الصورة: {e}")
+        return res.choices[0].message.content
+    except:
         return None
 
 def transcribe_audio(content_bytes, fmt="mp4"):
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}") as tmp:
-            tmp.write(content_bytes)
-            path = tmp.name
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}")
+        tmp.write(content_bytes)
+        tmp.close()
 
-        with open(path, "rb") as f:
+        with open(tmp.name, "rb") as f:
             tr = client.audio.transcriptions.create(model="whisper-1", file=f)
 
-        os.remove(path)
+        os.remove(tmp.name)
         return tr.text
     except:
         return None
 
-def download_media_from_url(url):
-    try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        return r.content
-    except:
-        return None
-
 # ===========================
-# OpenAI Thread Runner
+# OpenAI THREAD HANDLER
 # ===========================
-async def get_assistant_reply_async(session, content):
-    user_id = session["_id"]
+async def openai_reply(session, message):
+    uid = session["_id"]
     thread_id = session.get("openai_thread_id")
 
     if not thread_id:
-        thread = await asyncio.to_thread(client.beta.threads.create)
-        thread_id = thread.id
-        sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
-        logger.info(f"🔧 إنشاء thread جديد: {thread_id}")
+        t = await asyncio.to_thread(client.beta.threads.create)
+        thread_id = t.id
+        sessions_collection.update_one({"_id": uid}, {"$set": {"openai_thread_id": thread_id}})
+        logger.info(f"🔧 Thread جديد للمستخدم {uid}: {thread_id}")
 
     await asyncio.to_thread(
         client.beta.threads.messages.create,
         thread_id=thread_id,
         role="user",
-        content=content
+        content=message
     )
 
     run = await asyncio.to_thread(
@@ -204,34 +196,28 @@ async def get_assistant_reply_async(session, content):
     )
 
     try:
-        return msgs.data[0].content[0].text.value.strip()
+        return msgs.data[0].content[0].text.value
     except:
-        return "⚠️ لم أستطع استخراج الرد من المساعد."
+        return "⚠️ لم أستطع استخراج رد المساعد."
 
 # ===========================
-# إرسال ManyChat (إصلاح 400)
+# إرسال ManyChat (نهائي)
 # ===========================
-def send_manychat_reply(subscriber_id, text_message, platform):
-    logger.info(f"💬 إرسال رد للعميل {subscriber_id}")
-
-    if not MANYCHAT_API_KEY:
-        logger.error("❌ MANYCHAT_API_KEY غير موجود")
-        return
-
-    # الإصلاح النهائي:
-    # ManyChat يستخدم /fb/ لإرسال رسائل FB + IG معًا
-    channel = "facebook"
-    url = "https://api.manychat.com/fb/sending/sendContent"
+def send_manychat_reply(uid, text, platform):
+    if platform.lower() == "instagram":
+        url = "https://api.manychat.com/ig/sending/sendContent"
+        channel = "instagram"
+    else:
+        url = "https://api.manychat.com/fb/sending/sendContent"
+        channel = "facebook"
 
     payload = {
-        "subscriber_id": str(subscriber_id),
+        "subscriber_id": str(uid),
         "channel": channel,
         "data": {
             "version": "v2",
             "content": {
-                "messages": [
-                    {"type": "text", "text": text_message}
-                ]
+                "messages": [{"type": "text", "text": text}]
             }
         }
     }
@@ -246,28 +232,40 @@ def send_manychat_reply(subscriber_id, text_message, platform):
         r.raise_for_status()
         logger.info("✅ تم إرسال الرد بنجاح")
     except Exception as e:
-        logger.error(f"❌ فشل إرسال ManyChat: {e}")
+        logger.error(f"❌ فشل ManyChat: {e}", exc_info=True)
 
 # ===========================
-# جدولة الردود
+# BATCHING + SCHEDULING
 # ===========================
-def schedule_assistant_response(user_id):
+def add_to_queue(session, text):
+    uid = session["_id"]
     with queue_lock:
-        data = pending_messages.get(user_id)
-        if not data:
-            return
+        if uid not in pending_messages:
+            pending_messages[uid] = {"texts": [], "session": session}
+        pending_messages[uid]["texts"].append(text)
 
-    lock = run_locks.setdefault(user_id, threading.Lock())
+        t = message_timers.get(uid)
+        if t and t.is_alive():
+            t.cancel()
+
+        new_t = threading.Timer(BATCH_WAIT_TIME, schedule_response, args=[uid])
+        new_t.daemon = True
+        message_timers[uid] = new_t
+        new_t.start()
+
+def schedule_response(uid):
+    lock = run_locks.setdefault(uid, threading.Lock())
 
     if not lock.acquire(blocking=False):
-        timer = threading.Timer(RETRY_DELAY_WHEN_BUSY, schedule_assistant_response, args=[user_id])
-        timer.start()
+        t = threading.Timer(RETRY_DELAY, schedule_response, args=[uid])
+        t.daemon = True
+        t.start()
         return
 
     try:
         with queue_lock:
-            data = pending_messages.pop(user_id, None)
-            message_timers.pop(user_id, None)
+            data = pending_messages.pop(uid, None)
+            message_timers.pop(uid, None)
 
         if not data:
             return
@@ -277,64 +275,42 @@ def schedule_assistant_response(user_id):
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        reply = loop.run_until_complete(get_assistant_reply_async(session, merged))
+        reply = loop.run_until_complete(openai_reply(session, merged))
         loop.close()
 
-        send_manychat_reply(user_id, reply, session["platform"])
-
+        send_manychat_reply(uid, reply, session["platform"])
     finally:
         lock.release()
 
 # ===========================
-# إضافة رسالة لل큐
-# ===========================
-def add_to_queue(session, text):
-    uid = session["_id"]
-
-    with queue_lock:
-        if uid not in pending_messages:
-            pending_messages[uid] = {"texts": [], "session": session}
-
-        pending_messages[uid]["texts"].append(text)
-
-        if uid in message_timers:
-            message_timers[uid].cancel()
-
-        timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[uid])
-        message_timers[uid] = timer
-        timer.start()
-
-# ===========================
-# Webhook
+# WEBHOOK
 # ===========================
 @app.route("/manychat_webhook", methods=["POST"])
-def mc_webhook():
+def webhook():
     if MANYCHAT_SECRET_KEY:
-        auth = request.headers.get("Authorization")
-        if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
+        if request.headers.get("Authorization") != f"Bearer {MANYCHAT_SECRET_KEY}":
             return jsonify({"error": "unauthorized"}), 403
 
     data = request.get_json()
     contact = data.get("full_contact")
 
-    session = get_or_create_session_from_contact(contact, "ManyChat")
+    session = get_or_create_session(contact)
+    txt = contact.get("last_text_input")
 
-    txt = contact.get("last_text_input") or contact.get("last_input_text")
-    if txt:
+    if txt and txt.strip():
         add_to_queue(session, txt)
 
-    return jsonify({"ok": True}), 200
+    return jsonify({"ok": True})
 
 # ===========================
-# Home
+# HOME
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running V3 Final – عربي"
+    return "Bot Running V4 Final – عربي"
 
 # ===========================
-# Run
+# RUN SERVER
 # ===========================
 if __name__ == "__main__":
-    logger.info("🚀 السيرفر جاهز")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
