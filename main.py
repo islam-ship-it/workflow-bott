@@ -241,10 +241,10 @@ def send_manychat_reply(subscriber_id, text_message, platform):
         return
 
     # الإصلاح النهائي:
-	    # ManyChat يستخدم /fb/ لإرسال رسائل FB + IG معًا، ولكن يمكن تحديد القناة في حمولة الـ webhook
-	    # ملاحظة: ManyChat API v2 يستخدم "facebook" كقناة موحدة لـ FB و IG
-	    channel = "facebook"
-	    url = "https://api.manychat.com/fb/sending/sendContent"
+    # ManyChat يستخدم /fb/ لإرسال رسائل FB + IG معًا، ولكن يمكن تحديد القناة في حمولة الـ webhook
+    # ملاحظة: ManyChat API v2 يستخدم "facebook" كقناة موحدة لـ FB و IG
+    channel = "facebook"
+    url = "https://api.manychat.com/fb/sending/sendContent"
 
     payload = {
         "subscriber_id": str(subscriber_id),
