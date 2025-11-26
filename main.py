@@ -300,22 +300,22 @@ def schedule_assistant_response(user_id):
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-	        reply = loop.run_until_complete(get_assistant_reply_async(session, merged))
-	        loop.close()
-	
-	        # حفظ رد المساعد في سجل المحادثات
-	        sessions_collection.update_one(
-	            {"_id": user_id},
-	            {"$push": {
-	                "history": {
-	                    "role": "assistant",
-	                    "content": reply,
-	                    "timestamp": datetime.now(timezone.utc)
-	                }
-	            }}
-	        )
-	
-	        send_manychat_reply(user_id, reply, session["platform"])
+            reply = loop.run_until_complete(get_assistant_reply_async(session, merged))
+            loop.close()
+    
+            # حفظ رد المساعد في سجل المحادثات
+            sessions_collection.update_one(
+                {"_id": user_id},
+                {"$push": {
+                    "history": {
+                        "role": "assistant",
+                        "content": reply,
+                        "timestamp": datetime.now(timezone.utc)
+                    }
+                }}
+            )
+    
+            send_manychat_reply(user_id, reply, session["platform"])
 
     finally:
         lock.release()
@@ -327,22 +327,22 @@ def add_to_queue(session, text):
     uid = session["_id"]
 
     with queue_lock:
-	    if uid not in pending_messages:
-	        pending_messages[uid] = {"texts": [], "session": session}
+        if uid not in pending_messages:
+            pending_messages[uid] = {"texts": [], "session": session}
 
-	    pending_messages[uid]["texts"].append(text)
-	    
-	    # حفظ رسالة المستخدم في سجل المحادثات
-	    sessions_collection.update_one(
-	        {"_id": uid},
-	        {"$push": {
-	            "history": {
-	                "role": "user",
-	                "content": text,
-	                "timestamp": datetime.now(timezone.utc)
-	            }
-	        }}
-	    )
+        pending_messages[uid]["texts"].append(text)
+        
+        # حفظ رسالة المستخدم في سجل المحادثات
+        sessions_collection.update_one(
+            {"_id": uid},
+            {"$push": {
+                "history": {
+                    "role": "user",
+                    "content": text,
+                    "timestamp": datetime.now(timezone.utc)
+                }
+            }}
+        )
 
         if uid in message_timers:
             message_timers[uid].cancel()
@@ -415,66 +415,66 @@ def mc_webhook():
 # ===========================
 # Home
 # ===========================
-	@app.route("/")
-	def home():
-	    return "Bot running V3 Final – عربي"
-	
-	# ===========================
-	# طباعة المحادثات
-	# ===========================
-	@app.route("/print_history/<user_id>", methods=["GET"])
-	def print_history(user_id):
-	    session = sessions_collection.find_one({"_id": user_id})
-	
-	    if not session:
-	        return f"لا يوجد سجل محادثات للمستخدم: {user_id}", 404
-	
-	    history = session.get("history", [])
-	    
-	    if not history:
-	        return f"سجل المحادثات فارغ للمستخدم: {user_id}", 200
-	
-	    # تنسيق المحادثة في HTML لسهولة الطباعة
-	    html_content = f"""
-	    <!DOCTYPE html>
-	    <html lang="ar" dir="rtl">
-	    <head>
-	        <meta charset="UTF-8">
-	        <title>سجل المحادثات للمستخدم {user_id}</title>
-	        <style>
-	            body {{ font-family: 'Arial', sans-serif; line-height: 1.6; padding: 20px; direction: rtl; }}
-	            .message {{ margin-bottom: 15px; padding: 10px; border-radius: 8px; }}
-	            .user {{ background-color: #e6f7ff; border-left: 5px solid #1890ff; }}
-	            .assistant {{ background-color: #f6ffed; border-right: 5px solid #52c41a; text-align: right; }}
-	            .role {{ font-weight: bold; margin-bottom: 5px; }}
-	            .timestamp {{ font-size: 0.8em; color: #8c8c8c; }}
-	            .content {{ white-space: pre-wrap; }}
-	            h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; }}
-	        </style>
-	    </head>
-	    <body>
-	        <h1>سجل المحادثات</h1>
-	        <p><strong>معرف المستخدم:</strong> {user_id}</p>
-	        <p><strong>المنصة:</strong> {session.get("platform_source", "غير محدد")}</p>
-	        <p><strong>الاسم:</strong> {session.get("profile", {}).get("name", "غير متوفر")}</p>
-	        <hr>
-	    """
-	
-	    for msg in history:
-	        role = "المستخدم" if msg["role"] == "user" else "المساعد"
-	        css_class = "user" if msg["role"] == "user" else "assistant"
-	        timestamp = msg["timestamp"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(msg["timestamp"], datetime) else str(msg["timestamp"])
-	        
-	        html_content += f"""
-	        <div class="message {css_class}">
-	            <div class="role">{role} <span class="timestamp">({timestamp})</span></div>
-	            <div class="content">{msg["content"]}</div>
-	        </div>
-	        """
-	
-	    html_content += "</body></html>"
-	
-	    return html_content, 200, {'Content-Type': 'text/html; charset=utf-8'}
+    @app.route("/")
+    def home():
+        return "Bot running V3 Final – عربي"
+    
+    # ===========================
+    # طباعة المحادثات
+    # ===========================
+    @app.route("/print_history/<user_id>", methods=["GET"])
+    def print_history(user_id):
+        session = sessions_collection.find_one({"_id": user_id})
+    
+        if not session:
+            return f"لا يوجد سجل محادثات للمستخدم: {user_id}", 404
+    
+        history = session.get("history", [])
+        
+        if not history:
+            return f"سجل المحادثات فارغ للمستخدم: {user_id}", 200
+    
+        # تنسيق المحادثة في HTML لسهولة الطباعة
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="ar" dir="rtl">
+        <head>
+            <meta charset="UTF-8">
+            <title>سجل المحادثات للمستخدم {user_id}</title>
+            <style>
+                body {{ font-family: 'Arial', sans-serif; line-height: 1.6; padding: 20px; direction: rtl; }}
+                .message {{ margin-bottom: 15px; padding: 10px; border-radius: 8px; }}
+                .user {{ background-color: #e6f7ff; border-left: 5px solid #1890ff; }}
+                .assistant {{ background-color: #f6ffed; border-right: 5px solid #52c41a; text-align: right; }}
+                .role {{ font-weight: bold; margin-bottom: 5px; }}
+                .timestamp {{ font-size: 0.8em; color: #8c8c8c; }}
+                .content {{ white-space: pre-wrap; }}
+                h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+            </style>
+        </head>
+        <body>
+            <h1>سجل المحادثات</h1>
+            <p><strong>معرف المستخدم:</strong> {user_id}</p>
+            <p><strong>المنصة:</strong> {session.get("platform_source", "غير محدد")}</p>
+            <p><strong>الاسم:</strong> {session.get("profile", {}).get("name", "غير متوفر")}</p>
+            <hr>
+        """
+    
+        for msg in history:
+            role = "المستخدم" if msg["role"] == "user" else "المساعد"
+            css_class = "user" if msg["role"] == "user" else "assistant"
+            timestamp = msg["timestamp"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(msg["timestamp"], datetime) else str(msg["timestamp"])
+            
+            html_content += f"""
+            <div class="message {css_class}">
+                <div class="role">{role} <span class="timestamp">({timestamp})</span></div>
+                <div class="content">{msg["content"]}</div>
+            </div>
+            """
+    
+        html_content += "</body></html>"
+    
+        return html_content, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 # ===========================
 # Run
