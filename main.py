@@ -29,7 +29,7 @@ logger.info("▶️ بدء تشغيل التطبيق...")
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")  # نفس الـ Assistant للـ FB و IG
+ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
 
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
@@ -67,7 +67,6 @@ logger.info("🚀 Flask و OpenAI جاهزين")
 # ===========================
 # متغيرات التحكم (مفصولة لكل منصة)
 # ===========================
-# هيكل البيانات لكل منصة يكون: pending_messages[platform] = { user_id: {texts: [], session: {...}} }
 pending_messages = {"Facebook": {}, "Instagram": {}}
 message_timers = {"Facebook": {}, "Instagram": {}}
 run_locks = {"Facebook": {}, "Instagram": {}}
@@ -78,7 +77,7 @@ BATCH_WAIT_TIME = 9.0
 RETRY_DELAY_WHEN_BUSY = 3.0
 
 # ===========================
-# Utilities: تحميل وسحب ميديا وملفات صوتية
+# Utilities
 # ===========================
 def download_media_from_url(url, timeout=15):
     try:
@@ -99,11 +98,11 @@ def transcribe_audio(content_bytes, fmt="mp4"):
         os.remove(path)
         return tr.text
     except Exception as e:
-        logger.error(f"❌ خطأ في تحويل الصوت للنص: {e}")
+        logger.error(f"❌ خطأ تحويل الصوت للنص: {e}")
         return None
 
 async def get_image_description_for_assistant(base64_image):
-    logger.info("🖼️ معالجة صورة مع OpenAI (وصف)...")
+    logger.info("🖼️ معالجة صورة مع OpenAI ...")
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
@@ -123,7 +122,7 @@ async def get_image_description_for_assistant(base64_image):
         return None
 
 # ===========================
-# جلسة المستخدم (إنشاء أو استرجاع) + Detect platform by ig_id
+# جلسة المستخدم (حل إنستجرام القديم مركّب هنا)
 # ===========================
 def get_or_create_session_from_contact(contact_data, platform_hint=None):
     logger.info("====== 🧾 DEBUG CONTACT DATA ======")
@@ -131,20 +130,21 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
 
     user_id = str(contact_data.get("id"))
     if not user_id:
-        logger.error("❌ user_id غير موجود في contact_data")
+        logger.error("❌ user_id غير موجود")
         return None
 
-    # كشف المنصة الحقيقية: نستخدم ig_id أو ig_last_interaction كدليل على Instagram
-    ig_id = contact_data.get("ig_id")
-    ig_last = contact_data.get("ig_last_interaction")
-    if ig_id or ig_last:
-        main_platform = "Instagram"
+    # ------------------ حل النسخة القديمة — Detect IG صح ------------------
+    if platform_hint is None or platform_hint == "ManyChat":
+        if contact_data.get("ig_id") or contact_data.get("ig_last_interaction"):
+            main_platform = "Instagram"
+        else:
+            main_platform = "Facebook"
     else:
-        # fallback: لو المستخدم مرّر platform_hint استخدمه، وإلا Facebook افتراضياً
-        main_platform = platform_hint if platform_hint in ("Instagram", "Facebook") else "Facebook"
+        main_platform = platform_hint
+    # ----------------------------------------------------------------------
 
     logger.info(f"📌 subscriber_id = {user_id}")
-    logger.info(f"📱 رسالة جاية من: {main_platform}")
+    logger.info(f"📱 المنصة المكتشفة: {main_platform}")
 
     now_utc = datetime.now(timezone.utc)
     session = sessions_collection.find_one({"_id": user_id})
@@ -162,7 +162,6 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
         )
         return sessions_collection.find_one({"_id": user_id})
 
-    # جديد
     new_session = {
         "_id": user_id,
         "platform": main_platform,
@@ -181,25 +180,21 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
         "last_contact_date": now_utc
     }
     sessions_collection.insert_one(new_session)
-    logger.info(f"🆕 إنشاء جلسة جديدة للمستخدم {user_id} على {main_platform}")
+    logger.info(f"🆕 جلسة جديدة للمستخدم {user_id}")
     return new_session
 
 # ===========================
-# OpenAI Assistant runner (shared Assistant ID)
+# OpenAI Assistant
 # ===========================
 async def get_assistant_reply_async(session, content):
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
 
-    logger.info(f"🤖 بدء تشغيل Assistant للعميل {user_id} (platform={session.get('platform')})")
-
     if not thread_id:
         thread = await asyncio.to_thread(client.beta.threads.create)
         thread_id = thread.id
         sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
-        logger.info(f"🔧 إنشاء Thread جديد: {thread_id}")
 
-    # نضيف رسالة المستخدم للـ thread
     await asyncio.to_thread(
         client.beta.threads.messages.create,
         thread_id=thread_id,
@@ -207,14 +202,12 @@ async def get_assistant_reply_async(session, content):
         content=content
     )
 
-    # طلب run باستخدام نفس Assistant ID (مشفر في env ASSISTANT_ID_PREMIUM)
     run = await asyncio.to_thread(
         client.beta.threads.runs.create,
         thread_id=thread_id,
         assistant_id=ASSISTANT_ID_PREMIUM
     )
 
-    # انتظار انتهاء الـ run
     while run.status in ["in_progress", "queued"]:
         await asyncio.sleep(1)
         run = await asyncio.to_thread(
@@ -224,36 +217,23 @@ async def get_assistant_reply_async(session, content):
         )
 
     if run.status != "completed":
-        logger.error("❌ Assistant run لم يكتمل بنجاح")
-        return "⚠️ حصل خطأ أثناء المعالجة."
+        return "⚠️ حصل خطأ."
 
     msgs = await asyncio.to_thread(
         client.beta.threads.messages.list,
         thread_id=thread_id,
         limit=1
     )
-
-    try:
-        reply = msgs.data[0].content[0].text.value.strip()
-        logger.info(f"🤖 رد المساعد: {reply}")
-        return reply
-    except Exception as e:
-        logger.error(f"❌ فشل استخراج الرد من OpenAI: {e}")
-        return "⚠️ لم أستطع استخراج الرد."
+    return msgs.data[0].content[0].text.value.strip()
 
 # ===========================
-# إرسال ManyChat (بالتفرقة على channel حسب المنصة)
+# إرسال ManyChat
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform):
     logger.info("====== 📤 DEBUG MANYCHAT SEND ======")
-    logger.info(f"📌 subscriber_id: {subscriber_id}")
-    logger.info(f"📌 platform: {platform}")
-    logger.info(f"📩 message: {text_message}")
+    logger.info(f"platform = {platform}")
 
-    if platform == "Instagram":
-        channel = "instagram"
-    else:
-        channel = "facebook"
+    channel = "instagram" if platform == "Instagram" else "facebook"
 
     url = "https://api.manychat.com/fb/sending/sendContent"
 
@@ -275,24 +255,16 @@ def send_manychat_reply(subscriber_id, text_message, platform):
         "Content-Type": "application/json"
     }
 
-    try:
-        r = requests.post(url, headers=headers, data=json.dumps(payload))
-        logger.info(f"📥 ManyChat Response Code: {r.status_code}")
-        logger.info(f"📥 ManyChat Response Body: {r.text}")
-        r.raise_for_status()
-        logger.info("✅ الرد اتبعت بنجاح")
-    except Exception as e:
-        logger.error(f"❌ فشل إرسال ManyChat: {e}")
+    r = requests.post(url, headers=headers, data=json.dumps(payload))
+    logger.info(f"📥 ManyChat Response: {r.status_code} - {r.text}")
 
 # ===========================
-# Queue & Scheduler (مفصولة حسب المنصة)
+# Queue System
 # ===========================
 def schedule_assistant_response(platform, user_id):
-    # lock خاص بالمستخدم داخل المنصة
     lock = run_locks[platform].setdefault(user_id, threading.Lock())
 
     if not lock.acquire(blocking=False):
-        # retry لاحقًا
         threading.Timer(RETRY_DELAY_WHEN_BUSY, schedule_assistant_response, args=[platform, user_id]).start()
         return
 
@@ -306,8 +278,6 @@ def schedule_assistant_response(platform, user_id):
 
         session = data["session"]
         merged = "\n".join(data["texts"])
-
-        logger.info(f"📨 دمج الرسائل للعميل {user_id} على {platform}: {merged}")
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -331,55 +301,37 @@ def add_to_queue(session, text):
 
         pending_messages[platform][uid]["texts"].append(text)
 
-        # الغاء التايمر القديم لو موجود
         if uid in message_timers[platform]:
             try:
                 message_timers[platform][uid].cancel()
-            except Exception:
+            except:
                 pass
 
         timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[platform, uid])
         message_timers[platform][uid] = timer
         timer.start()
 
-    logger.info(f"📝 إضافة رسالة للطابور → platform={platform} uid={uid}: {text}")
-
 # ===========================
-# Webhook Endpoint
+# ManyChat Webhook
 # ===========================
 @app.route("/manychat_webhook", methods=["POST"])
 def mc_webhook():
-    logger.info("====== 🔔 NEW MANYCHAT WEBHOOK RECEIVED ======")
-
     if MANYCHAT_SECRET_KEY:
         auth = request.headers.get("Authorization")
         if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
-            logger.error("🚫 Authorization failed للـ ManyChat webhook")
             return jsonify({"error": "unauthorized"}), 403
 
     data = request.get_json()
-    logger.info("====== 📥 RAW WEBHOOK BODY ======")
-    logger.info(json.dumps(data, indent=2, ensure_ascii=False))
-
     contact = data.get("full_contact")
     if not contact:
-        logger.error("❌ full_contact مفقود في payload")
         return jsonify({"error": "missing contact"}), 400
 
-    # إنشاء/استخراج الجلسة مع كشف المنصة الحقيقية
-    session = get_or_create_session_from_contact(contact, platform_hint=None)
-    if not session:
-        return jsonify({"error": "session error"}), 400
+    session = get_or_create_session_from_contact(contact, platform_hint="ManyChat")
 
-    # قراءة آخر نص أو مدخل
     txt = contact.get("last_text_input") or contact.get("last_input_text")
 
-    # لو فيه رابط صورة/ميديا في last_text_input نقدر نحاول تنزيلها - لكن هنا ببساطة ندخل النص
     if txt:
-        logger.info(f"📩 نص مستلم: {txt}")
         add_to_queue(session, txt)
-    else:
-        logger.warning("⚠️ لا توجد رسالة نصية في payload")
 
     return jsonify({"ok": True}), 200
 
@@ -388,7 +340,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running – FB & IG isolated Queues – Same Assistant"
+    return "Bot running – FB & IG isolated Queues – Same Assistant – IG Fix Added"
 
 # ===========================
 # Run
