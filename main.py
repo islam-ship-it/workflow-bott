@@ -82,8 +82,13 @@ def get_or_create_session_from_contact(contact_data, platform):
 
     logger.info(f"📌 subscriber_id = {user_id}")
 
-    source = contact_data.get("source", "").lower()
-    if "instagram" in source:
+    # ============================================================
+    #       🔥🔥 Instagram REAL DETECTION (FIX INSTAGRAM) 🔥🔥
+    # ============================================================
+    ig_id = contact_data.get("ig_id")
+    ig_last = contact_data.get("ig_last_interaction")
+
+    if ig_id or ig_last:
         main_platform = "Instagram"
     else:
         main_platform = "Facebook"
@@ -125,7 +130,7 @@ def get_or_create_session_from_contact(contact_data, platform):
 
 
 # ===========================
-# Vision + Whisper
+# Assistant OpenAI
 # ===========================
 async def get_assistant_reply_async(session, content):
     user_id = session["_id"]
@@ -163,7 +168,7 @@ async def get_assistant_reply_async(session, content):
         )
 
     if run.status != "completed":
-        logger.error("❌ Assistant run لم يكتمل")
+        logger.error("❌ Assistant لم يكتمل")
         return "⚠️ حصل خطأ أثناء المعالجة."
 
     msgs = await asyncio.to_thread(
@@ -182,7 +187,7 @@ async def get_assistant_reply_async(session, content):
 
 
 # ===========================
-# إرسال ManyChat + Debug
+# إرسال ManyChat (Instagram Fix)
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform):
 
@@ -191,11 +196,19 @@ def send_manychat_reply(subscriber_id, text_message, platform):
     logger.info(f"📌 platform: {platform}")
     logger.info(f"📩 message: {text_message}")
 
+    # ============================================================
+    #      🔥🔥  FIX SENDING CHANNEL (Instagram / Facebook) 🔥🔥
+    # ============================================================
+    if platform == "Instagram":
+        channel = "instagram"
+    else:
+        channel = "facebook"
+
     url = "https://api.manychat.com/fb/sending/sendContent"
 
     payload = {
         "subscriber_id": str(subscriber_id),
-        "channel": "facebook",
+        "channel": channel,
         "data": {
             "version": "v2",
             "content": {
@@ -225,7 +238,7 @@ def send_manychat_reply(subscriber_id, text_message, platform):
 
 
 # ===========================
-# Queue + Scheduler
+# Queue System
 # ===========================
 def schedule_assistant_response(user_id):
     lock = run_locks.setdefault(user_id, threading.Lock())
@@ -317,7 +330,7 @@ def mc_webhook():
 
 @app.route("/")
 def home():
-    return "Bot running – DEBUG MODE"
+    return "Bot running – Instagram FIXED V4"
 
 
 if __name__ == "__main__":
