@@ -35,16 +35,6 @@ MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 
-# تحقق من المتطلبات الأساسية
-if not OPENAI_API_KEY:
-    logger.error("❌ متغير OPENAI_API_KEY مفقود")
-if not MANYCHAT_API_KEY:
-    logger.error("❌ متغير MANYCHAT_API_KEY مفقود")
-if not MONGO_URI:
-    logger.error("❌ متغير MONGO_URI مفقود")
-if not ASSISTANT_ID_PREMIUM:
-    logger.error("❌ متغير ASSISTANT_ID_PREMIUM مفقود")
-
 # ===========================
 # اتصال بقاعدة البيانات
 # ===========================
@@ -122,7 +112,7 @@ async def get_image_description_for_assistant(base64_image):
         return None
 
 # ===========================
-# جلسة المستخدم (حل إنستجرام القديم مركّب هنا)
+# جلسة المستخدم (حل إنستجرام القديم مركّب)
 # ===========================
 def get_or_create_session_from_contact(contact_data, platform_hint=None):
     logger.info("====== 🧾 DEBUG CONTACT DATA ======")
@@ -133,7 +123,7 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
         logger.error("❌ user_id غير موجود")
         return None
 
-    # ------------------ حل النسخة القديمة — Detect IG صح ------------------
+    # Detect IG
     if platform_hint is None or platform_hint == "ManyChat":
         if contact_data.get("ig_id") or contact_data.get("ig_last_interaction"):
             main_platform = "Instagram"
@@ -141,7 +131,6 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
             main_platform = "Facebook"
     else:
         main_platform = platform_hint
-    # ----------------------------------------------------------------------
 
     logger.info(f"📌 subscriber_id = {user_id}")
     logger.info(f"📱 المنصة المكتشفة: {main_platform}")
@@ -162,6 +151,7 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
         )
         return sessions_collection.find_one({"_id": user_id})
 
+    # جديد
     new_session = {
         "_id": user_id,
         "platform": main_platform,
@@ -326,6 +316,17 @@ def mc_webhook():
     if not contact:
         return jsonify({"error": "missing contact"}), 400
 
+    # ---------------------------
+    # 🔥 حماية Instagram من Webhook Facebook الوهمي
+    # ---------------------------
+    user_id = str(contact.get("id"))
+    existing_session = sessions_collection.find_one({"_id": user_id})
+
+    if existing_session and existing_session["platform"] == "Instagram" and not contact.get("ig_id"):
+        logger.warning("⚠️ Webhook تجاهلناه: ManyChat بعت Webhook ناقص ig_id لمستخدم IG")
+        return jsonify({"ignored": True}), 200
+    # ---------------------------
+
     session = get_or_create_session_from_contact(contact, platform_hint="ManyChat")
 
     txt = contact.get("last_text_input") or contact.get("last_input_text")
@@ -340,7 +341,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running – FB & IG isolated Queues – Same Assistant – IG Fix Added"
+    return "Bot running – FB & IG isolated Queues – Instagram Webhook Protection Added"
 
 # ===========================
 # Run
