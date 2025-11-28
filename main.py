@@ -14,19 +14,18 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # ===========================
-# إعداد اللوجات بالعربي
+# إعداد اللوجات
 # ===========================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 logger.info("▶️ بدء تشغيل التطبيق...")
 
 # ===========================
-# تحميل الإعدادات من .env
+# تحميل الإعدادات
 # ===========================
 load_dotenv()
 
@@ -46,11 +45,11 @@ try:
     sessions_collection = db["sessions"]
     logger.info("✅ متصل بقاعدة البيانات")
 except Exception as e:
-    logger.error(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
+    logger.error(f"❌ خطأ DB: {e}")
     raise
 
 # ===========================
-# إعداد Flask و OpenAI
+# Flask + OpenAI
 # ===========================
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -71,15 +70,28 @@ RETRY_DELAY_WHEN_BUSY = 3.0
 # السيشن
 # ===========================
 def get_or_create_session_from_contact(contact_data, platform):
+
+    logger.info("====== 🧾 DEBUG CONTACT DATA ======")
+    logger.info(json.dumps(contact_data, indent=2, ensure_ascii=False))
+
     user_id = str(contact_data.get("id"))
+
     if not user_id:
         logger.error("❌ user_id غير موجود")
         return None
 
-    session = sessions_collection.find_one({"_id": user_id})
-    now_utc = datetime.now(timezone.utc)
+    logger.info(f"📌 subscriber_id = {user_id}")
 
-    main_platform = "Instagram" if "instagram" in (contact_data.get("source","").lower()) else "Facebook"
+    source = contact_data.get("source", "").lower()
+    if "instagram" in source:
+        main_platform = "Instagram"
+    else:
+        main_platform = "Facebook"
+
+    logger.info(f"📱 رسالة جاية من: {main_platform}")
+
+    now_utc = datetime.now(timezone.utc)
+    session = sessions_collection.find_one({"_id": user_id})
 
     if session:
         sessions_collection.update_one(
@@ -88,90 +100,44 @@ def get_or_create_session_from_contact(contact_data, platform):
                 "last_contact_date": now_utc,
                 "platform": main_platform,
                 "profile.name": contact_data.get("name"),
-                "profile.profile_pic": contact_data.get("profile_pic"),
                 "status": "active"
             }}
         )
         return sessions_collection.find_one({"_id": user_id})
 
-    new_session = {
+    session = {
         "_id": user_id,
         "platform": main_platform,
         "profile": {
             "name": contact_data.get("name"),
-            "first_name": contact_data.get("first_name"),
-            "last_name": contact_data.get("last_name"),
-            "profile_pic": contact_data.get("profile_pic"),
+            "profile_pic": contact_data.get("profile_pic")
         },
         "openai_thread_id": None,
-        "custom_fields": contact_data.get("custom_fields", {}),
-        "tags": [f"source:{main_platform.lower()}"],
         "status": "active",
-        "conversation_summary": "",
         "first_contact_date": now_utc,
         "last_contact_date": now_utc
     }
-    sessions_collection.insert_one(new_session)
+
+    sessions_collection.insert_one(session)
     logger.info(f"🆕 إنشاء جلسة جديدة للمستخدم {user_id}")
-    return new_session
+
+    return session
+
 
 # ===========================
 # Vision + Whisper
 # ===========================
-async def get_image_description_for_assistant(base64_image):
-    logger.info("🖼️ معالجة صورة...")
-    try:
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model="gpt-4.1",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "اقرأ محتوى الصورة بدقة."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]
-            }],
-            max_tokens=300
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"❌ خطأ معالجة الصورة: {e}")
-        return None
-
-def transcribe_audio(content_bytes, fmt="mp4"):
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}") as tmp:
-            tmp.write(content_bytes)
-            path = tmp.name
-
-        with open(path, "rb") as f:
-            tr = client.audio.transcriptions.create(model="whisper-1", file=f)
-
-        os.remove(path)
-        return tr.text
-    except:
-        return None
-
-def download_media_from_url(url):
-    try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        return r.content
-    except:
-        return None
-
-# ===========================
-# OpenAI Thread Runner
-# ===========================
 async def get_assistant_reply_async(session, content):
     user_id = session["_id"]
+    logger.info(f"🤖 بدء تشغيل Assistant للعميل {user_id}")
+
     thread_id = session.get("openai_thread_id")
 
     if not thread_id:
         thread = await asyncio.to_thread(client.beta.threads.create)
         thread_id = thread.id
         sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
-        logger.info(f"🔧 إنشاء thread جديد: {thread_id}")
+        logger.info(f"🔧 إنشاء Thread جديد: {thread_id}")
 
     await asyncio.to_thread(
         client.beta.threads.messages.create,
@@ -179,6 +145,8 @@ async def get_assistant_reply_async(session, content):
         role="user",
         content=content
     )
+
+    logger.info("⌛ تشغيل المعالجة...")
 
     run = await asyncio.to_thread(
         client.beta.threads.runs.create,
@@ -195,6 +163,7 @@ async def get_assistant_reply_async(session, content):
         )
 
     if run.status != "completed":
+        logger.error("❌ Assistant run لم يكتمل")
         return "⚠️ حصل خطأ أثناء المعالجة."
 
     msgs = await asyncio.to_thread(
@@ -204,28 +173,29 @@ async def get_assistant_reply_async(session, content):
     )
 
     try:
-        return msgs.data[0].content[0].text.value.strip()
+        reply = msgs.data[0].content[0].text.value.strip()
+        logger.info(f"🤖 رد المساعد: {reply}")
+        return reply
     except:
-        return "⚠️ لم أستطع استخراج الرد من المساعد."
+        logger.error("❌ لم أستطع استخراج رد OpenAI")
+        return "⚠️ لم أستطع استخراج الرد."
+
 
 # ===========================
-# إرسال ManyChat (إصلاح 400)
+# إرسال ManyChat + Debug
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform):
-    logger.info(f"💬 إرسال رد للعميل {subscriber_id}")
 
-    if not MANYCHAT_API_KEY:
-        logger.error("❌ MANYCHAT_API_KEY غير موجود")
-        return
+    logger.info("====== 📤 DEBUG MANYCHAT SEND ======")
+    logger.info(f"📌 subscriber_id: {subscriber_id}")
+    logger.info(f"📌 platform: {platform}")
+    logger.info(f"📩 message: {text_message}")
 
-    # الإصلاح النهائي:
-    # ManyChat يستخدم /fb/ لإرسال رسائل FB + IG معًا
-    channel = "facebook"
     url = "https://api.manychat.com/fb/sending/sendContent"
 
     payload = {
         "subscriber_id": str(subscriber_id),
-        "channel": channel,
+        "channel": "facebook",
         "data": {
             "version": "v2",
             "content": {
@@ -243,25 +213,25 @@ def send_manychat_reply(subscriber_id, text_message, platform):
 
     try:
         r = requests.post(url, headers=headers, data=json.dumps(payload))
+
+        logger.info(f"📥 ManyChat Response Code: {r.status_code}")
+        logger.info(f"📥 ManyChat Response Body: {r.text}")
+
         r.raise_for_status()
-        logger.info("✅ تم إرسال الرد بنجاح")
+        logger.info("✅ الرد اتبعت بنجاح")
+
     except Exception as e:
-        logger.error(f"❌ فشل إرسال ManyChat: {e}")
+        logger.error(f"❌ خطأ إرسال ManyChat: {e}")
+
 
 # ===========================
-# جدولة الردود
+# Queue + Scheduler
 # ===========================
 def schedule_assistant_response(user_id):
-    with queue_lock:
-        data = pending_messages.get(user_id)
-        if not data:
-            return
-
     lock = run_locks.setdefault(user_id, threading.Lock())
 
     if not lock.acquire(blocking=False):
-        timer = threading.Timer(RETRY_DELAY_WHEN_BUSY, schedule_assistant_response, args=[user_id])
-        timer.start()
+        threading.Timer(RETRY_DELAY_WHEN_BUSY, schedule_assistant_response, args=[user_id]).start()
         return
 
     try:
@@ -273,11 +243,13 @@ def schedule_assistant_response(user_id):
             return
 
         session = data["session"]
-        merged = "\n".join(data["texts"])
+        text = "\n".join(data["texts"])
+
+        logger.info(f"📨 دمج الرسائل للعميل {user_id}: {text}")
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        reply = loop.run_until_complete(get_assistant_reply_async(session, merged))
+        reply = loop.run_until_complete(get_assistant_reply_async(session, text))
         loop.close()
 
         send_manychat_reply(user_id, reply, session["platform"])
@@ -285,9 +257,7 @@ def schedule_assistant_response(user_id):
     finally:
         lock.release()
 
-# ===========================
-# إضافة رسالة لل큐
-# ===========================
+
 def add_to_queue(session, text):
     uid = session["_id"]
 
@@ -304,37 +274,52 @@ def add_to_queue(session, text):
         message_timers[uid] = timer
         timer.start()
 
+    logger.info(f"📝 إضافة رسالة للطابور → {uid}: {text}")
+
+
 # ===========================
 # Webhook
 # ===========================
 @app.route("/manychat_webhook", methods=["POST"])
 def mc_webhook():
+
+    logger.info("====== 🔔 NEW MANYCHAT WEBHOOK RECEIVED ======")
+
     if MANYCHAT_SECRET_KEY:
         auth = request.headers.get("Authorization")
         if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
+            logger.error("🚫 Authorization failed")
             return jsonify({"error": "unauthorized"}), 403
 
     data = request.get_json()
+
+    logger.info("====== 📥 RAW WEBHOOK BODY ======")
+    logger.info(json.dumps(data, indent=2, ensure_ascii=False))
+
     contact = data.get("full_contact")
+
+    if not contact:
+        logger.error("❌ full_contact مفقود")
+        return jsonify({"error": "missing contact"}), 400
 
     session = get_or_create_session_from_contact(contact, "ManyChat")
 
     txt = contact.get("last_text_input") or contact.get("last_input_text")
+
     if txt:
+        logger.info(f"📩 نص مستلم: {txt}")
         add_to_queue(session, txt)
+    else:
+        logger.warning("⚠️ لا توجد رسالة نصية")
 
     return jsonify({"ok": True}), 200
 
-# ===========================
-# Home
-# ===========================
+
 @app.route("/")
 def home():
-    return "Bot running V3 Final – عربي"
+    return "Bot running – DEBUG MODE"
 
-# ===========================
-# Run
-# ===========================
+
 if __name__ == "__main__":
-    logger.info("🚀 السيرفر جاهز")
+    logger.info("🚀 السيرفر جاهز للعمل")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
