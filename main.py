@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 logger.info("▶️ بدء تشغيل التطبيق...")
 
 # ===========================
+# دالة DEBUG شاملة
+# ===========================
+def debug(title, data=None):
+    logger.info("\n" + "="*70)
+    logger.info(f"🔍 {title}")
+    if data is not None:
+        try:
+            logger.info(json.dumps(data, indent=2, ensure_ascii=False))
+        except:
+            logger.info(str(data))
+    logger.info("="*70 + "\n")
+
+
+# ===========================
 # تحميل الإعدادات من .env
 # ===========================
 load_dotenv()
@@ -34,6 +48,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
+
 
 # ===========================
 # اتصال بقاعدة البيانات
@@ -47,12 +62,14 @@ except Exception as e:
     logger.error(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
     raise
 
+
 # ===========================
 # Flask و OpenAI
 # ===========================
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 Flask و OpenAI جاهزين")
+
 
 # ===========================
 # متغيرات التحكم (مفصولة لكل منصة)
@@ -66,19 +83,24 @@ queue_lock = threading.Lock()
 BATCH_WAIT_TIME = 9.0
 RETRY_DELAY_WHEN_BUSY = 3.0
 
+
 # ===========================
 # Utilities
 # ===========================
 def download_media_from_url(url, timeout=15):
+    debug("🌐 Downloading Media", url)
     try:
         r = requests.get(url, timeout=timeout)
         r.raise_for_status()
         return r.content
     except Exception as e:
-        logger.error(f"❌ فشل تحميل الميديا من URL: {e}")
+        debug("❌ فشل تحميل الميديا", str(e))
         return None
 
+
 def transcribe_audio(content_bytes, fmt="mp4"):
+    debug("🎤 Converting Audio To Text", {"format": fmt})
+
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}") as tmp:
             tmp.write(content_bytes)
@@ -88,11 +110,13 @@ def transcribe_audio(content_bytes, fmt="mp4"):
         os.remove(path)
         return tr.text
     except Exception as e:
-        logger.error(f"❌ خطأ تحويل الصوت للنص: {e}")
+        debug("❌ خطأ تحويل الصوت", str(e))
         return None
 
+
 async def get_image_description_for_assistant(base64_image):
-    logger.info("🖼️ معالجة صورة مع OpenAI ...")
+    debug("🖼️ وصف صورة", "")
+
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
@@ -108,22 +132,22 @@ async def get_image_description_for_assistant(base64_image):
         )
         return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"❌ خطأ معالجة الصورة: {e}")
+        debug("❌ خطأ رؤية الصورة", str(e))
         return None
 
+
 # ===========================
-# جلسة المستخدم (حل إنستجرام القديم مركّب)
+# جلسة المستخدم
 # ===========================
 def get_or_create_session_from_contact(contact_data, platform_hint=None):
-    logger.info("====== 🧾 DEBUG CONTACT DATA ======")
-    logger.info(json.dumps(contact_data, indent=2, ensure_ascii=False))
+    debug("🧾 FULL CONTACT DATA", contact_data)
 
     user_id = str(contact_data.get("id"))
     if not user_id:
-        logger.error("❌ user_id غير موجود")
+        debug("❌ user_id مفقود", "")
         return None
 
-    # Detect IG
+    # اكتشاف المنصة
     if platform_hint is None or platform_hint == "ManyChat":
         if contact_data.get("ig_id") or contact_data.get("ig_last_interaction"):
             main_platform = "Instagram"
@@ -132,8 +156,7 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
     else:
         main_platform = platform_hint
 
-    logger.info(f"📌 subscriber_id = {user_id}")
-    logger.info(f"📱 المنصة المكتشفة: {main_platform}")
+    debug("📱 PLATFORM DETECTED", {"user_id": user_id, "platform": main_platform})
 
     now_utc = datetime.now(timezone.utc)
     session = sessions_collection.find_one({"_id": user_id})
@@ -149,6 +172,7 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
                 "status": "active"
             }}
         )
+        debug("♻ SESSION UPDATED", session)
         return sessions_collection.find_one({"_id": user_id})
 
     # جديد
@@ -170,20 +194,27 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
         "last_contact_date": now_utc
     }
     sessions_collection.insert_one(new_session)
-    logger.info(f"🆕 جلسة جديدة للمستخدم {user_id}")
+
+    debug("🆕 SESSION CREATED", new_session)
     return new_session
+
 
 # ===========================
 # OpenAI Assistant
 # ===========================
 async def get_assistant_reply_async(session, content):
+    debug("🤖 Assistant Processing", {"user": session["_id"]})
+
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
 
     if not thread_id:
         thread = await asyncio.to_thread(client.beta.threads.create)
         thread_id = thread.id
+
         sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
+
+        debug("🧵 NEW THREAD CREATED", {"thread_id": thread_id})
 
     await asyncio.to_thread(
         client.beta.threads.messages.create,
@@ -207,6 +238,7 @@ async def get_assistant_reply_async(session, content):
         )
 
     if run.status != "completed":
+        debug("❌ RUN FAILED", run.status)
         return "⚠️ حصل خطأ."
 
     msgs = await asyncio.to_thread(
@@ -214,17 +246,23 @@ async def get_assistant_reply_async(session, content):
         thread_id=thread_id,
         limit=1
     )
-    return msgs.data[0].content[0].text.value.strip()
+    reply = msgs.data[0].content[0].text.value.strip()
+
+    debug("💬 Assistant Reply Ready", reply)
+    return reply
+
 
 # ===========================
 # إرسال ManyChat
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform):
-    logger.info("====== 📤 DEBUG MANYCHAT SEND ======")
-    logger.info(f"platform = {platform}")
+    debug("📤 Sending ManyChat Reply", {
+        "subscriber_id": subscriber_id,
+        "message": text_message,
+        "platform": platform
+    })
 
     channel = "instagram" if platform == "Instagram" else "facebook"
-
     url = "https://api.manychat.com/fb/sending/sendContent"
 
     payload = {
@@ -233,9 +271,7 @@ def send_manychat_reply(subscriber_id, text_message, platform):
         "data": {
             "version": "v2",
             "content": {
-                "messages": [
-                    {"type": "text", "text": text_message}
-                ]
+                "messages": [{"type": "text", "text": text_message}]
             }
         }
     }
@@ -246,15 +282,19 @@ def send_manychat_reply(subscriber_id, text_message, platform):
     }
 
     r = requests.post(url, headers=headers, data=json.dumps(payload))
-    logger.info(f"📥 ManyChat Response: {r.status_code} - {r.text}")
+    debug("📥 MANYCHAT RESPONSE", {"status": r.status_code, "body": r.text})
+
 
 # ===========================
 # Queue System
 # ===========================
 def schedule_assistant_response(platform, user_id):
+    debug("⚙ Queue Run Started", {"platform": platform, "user": user_id})
+
     lock = run_locks[platform].setdefault(user_id, threading.Lock())
 
     if not lock.acquire(blocking=False):
+        debug("⏳ Assistant Busy – Retrying", {"user": user_id})
         threading.Timer(RETRY_DELAY_WHEN_BUSY, schedule_assistant_response, args=[platform, user_id]).start()
         return
 
@@ -269,6 +309,8 @@ def schedule_assistant_response(platform, user_id):
         session = data["session"]
         merged = "\n".join(data["texts"])
 
+        debug("📝 MERGED USER MESSAGES", merged)
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -281,9 +323,12 @@ def schedule_assistant_response(platform, user_id):
     finally:
         lock.release()
 
+
 def add_to_queue(session, text):
     platform = session["platform"]
     uid = session["_id"]
+
+    debug("📥 ADDING TO QUEUE", {"user": uid, "msg": text})
 
     with queue_lock:
         if uid not in pending_messages[platform]:
@@ -301,31 +346,42 @@ def add_to_queue(session, text):
         message_timers[platform][uid] = timer
         timer.start()
 
+        debug("⏳ QUEUE UPDATED", {
+            "platform": platform,
+            "user": uid,
+            "pending_count": len(pending_messages[platform][uid]["texts"])
+        })
+
+
 # ===========================
 # ManyChat Webhook
 # ===========================
 @app.route("/manychat_webhook", methods=["POST"])
 def mc_webhook():
+
+    debug("📩 Webhook Received", "")
+
     if MANYCHAT_SECRET_KEY:
         auth = request.headers.get("Authorization")
         if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
+            debug("❌ Unauthorized Webhook", auth)
             return jsonify({"error": "unauthorized"}), 403
 
     data = request.get_json()
+    debug("📦 RAW WEBHOOK DATA", data)
+
     contact = data.get("full_contact")
     if not contact:
+        debug("❌ Missing Contact", "")
         return jsonify({"error": "missing contact"}), 400
 
-    # ---------------------------
-    # 🔥 حماية Instagram من Webhook Facebook الوهمي
-    # ---------------------------
     user_id = str(contact.get("id"))
     existing_session = sessions_collection.find_one({"_id": user_id})
 
+    # حماية IG من Webhook FB
     if existing_session and existing_session["platform"] == "Instagram" and not contact.get("ig_id"):
-        logger.warning("⚠️ Webhook تجاهلناه: ManyChat بعت Webhook ناقص ig_id لمستخدم IG")
+        debug("⚠ BLOCKED FAKE IG WEBHOOK", contact)
         return jsonify({"ignored": True}), 200
-    # ---------------------------
 
     session = get_or_create_session_from_contact(contact, platform_hint="ManyChat")
 
@@ -333,15 +389,19 @@ def mc_webhook():
 
     if txt:
         add_to_queue(session, txt)
+    else:
+        debug("⚠ No Text Found In Webhook", "")
 
     return jsonify({"ok": True}), 200
 
+
 # ===========================
-# Home
+# Home Route
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running – FB & IG isolated Queues – Instagram Webhook Protection Added"
+    return "Bot running with FULL DEBUG – FB & IG isolated – IG Protection Enabled"
+
 
 # ===========================
 # Run
