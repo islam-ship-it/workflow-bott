@@ -40,14 +40,11 @@ def debug(title, data=None):
 # تحميل الإعدادات
 # ===========================
 load_dotenv()
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
-
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
-
 
 # ===========================
 # قاعدة البيانات
@@ -74,9 +71,7 @@ logger.info("🚀 Flask و OpenAI جاهزين")
 pending_messages = {"Facebook": {}, "Instagram": {}}
 message_timers = {"Facebook": {}, "Instagram": {}}
 run_locks = {"Facebook": {}, "Instagram": {}}
-
 queue_lock = threading.Lock()
-
 BATCH_WAIT_TIME = 9.0
 RETRY_DELAY_WHEN_BUSY = 3.0
 
@@ -112,7 +107,7 @@ async def get_image_description_for_assistant(base64_image):
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
-            model="gpt-4.1",
+            model="gpt-4o",  # تم التحديث لأحدث موديل متاح
             messages=[{
                 "role": "user",
                 "content": [
@@ -243,12 +238,12 @@ async def get_assistant_reply_async(session, content):
     return reply
 
 # ===========================
-# إرسال ManyChat (مع إصلاح مشكلة 24 ساعة بالـ tag fallback)
+# إرسال ManyChat (تم التعديل لحل مشكلة إنستجرام)
 # ===========================
-def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="post_sale"):
+def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUMAN_AGENT"):
     """
-    يحاول أولًا إرسال رسالة عادية. لو ManyChat رجع خطأ 3011 (خارج نافذة الـ 24 ساعة)
-    يعيد المحاولة مع إضافة الحقل 'tag' داخل كل رسالة (مثال: "post_sale").
+    يحاول أولًا إرسال رسالة عادية. لو ManyChat رجع خطأ خاص بالـ 24 ساعة،
+    يعيد المحاولة مع إضافة التاج المناسب للمنصة.
     """
     debug("📤 Sending ManyChat Reply", {
         "subscriber_id": subscriber_id,
@@ -258,8 +253,11 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="pos
 
     channel = "instagram" if platform == "Instagram" else "facebook"
     url = "https://api.manychat.com/fb/sending/sendContent"
+    
+    # تحديد التاج المناسب: إنستجرام يحتاج HUMAN_AGENT حصرياً لتجاوز النافذة
+    effective_tag = "HUMAN_AGENT" if platform == "Instagram" else "post_sale"
 
-    # payload بدون tag أولًا (يحافظ على السلوك الحالي لو الرسائل ضمن الـ24 ساعة)
+    # 1. المحاولة الأولى: Payload نظيف (بدون tag) للحالات العادية
     base_payload = {
         "subscriber_id": str(subscriber_id),
         "channel": channel,
@@ -282,20 +280,21 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="pos
         debug("❌ Network error when sending to ManyChat", str(e))
         return {"ok": False, "error": str(e)}
 
-    debug("📥 MANYCHAT RESPONSE", {"status": r.status_code, "body": r.text})
-
-    # If success -> return
+    # لو نجح -> تمام
     if r.status_code == 200:
+        debug("✅ Message Sent Successfully", r.status_code)
         return {"ok": True, "status": r.status_code, "body": r.text}
 
-    # If ManyChat returned 400 with code 3011 -> retry with message tag (post_sale)
+    # 2. المحاولة الثانية: لو فشل وظهر خطأ يشير للنافذة الزمنية
+    # الأكواد الشائعة: 3011، أو رسالة "Outside 24 hours window"
     try:
         body_json = r.json()
-    except Exception:
+    except:
         body_json = {"raw": r.text}
 
-    if r.status_code == 400 and (str(body_json).find("3011") != -1 or "24 ساعة" in r.text or "last interaction" in r.text):
-        debug("⚠️ ManyChat 24h window error detected — retrying with tag", {"original_response": body_json})
+    error_str = r.text.lower()
+    if r.status_code == 400 and ("3011" in error_str or "24" in error_str or "window" in error_str or "interaction" in error_str):
+        debug(f"⚠️ 24h Window Error Detected ({platform}) — Retrying with tag: {effective_tag}", body_json)
 
         tagged_payload = {
             "subscriber_id": str(subscriber_id),
@@ -303,8 +302,8 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="pos
             "data": {
                 "version": "v2",
                 "content": {
-                    # Important: add "tag" field inside each message as manychat expects in some flows
-                    "messages": [{"type": "text", "text": text_message, "tag": fallback_tag}]
+                    # إضافة التاج هنا هو الحل السحري
+                    "messages": [{"type": "text", "text": text_message, "tag": effective_tag}]
                 }
             }
         }
@@ -317,7 +316,7 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="pos
             debug("❌ Network error on retry with tag", str(e))
             return {"ok": False, "error": str(e)}
 
-    # For other errors, return raw response
+    # لأي خطأ آخر
     return {"ok": False, "status": r.status_code, "body": r.text}
 
 # ===========================
@@ -395,7 +394,6 @@ def add_to_queue(session, text):
 # ===========================
 @app.route("/manychat_webhook", methods=["POST"])
 def mc_webhook():
-
     debug("📩 Webhook Received", "")
 
     if MANYCHAT_SECRET_KEY:
