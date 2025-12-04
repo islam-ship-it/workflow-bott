@@ -238,11 +238,11 @@ async def get_assistant_reply_async(session, content):
     return reply
 
 # ===========================
-# إرسال ManyChat (القوي والمحسن لإنستجرام)
+# إرسال ManyChat (الحل الجذري لمشكلة إنستجرام)
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUMAN_AGENT"):
     """
-    نسخة قوية: تحاول الإرسال النظيف، ثم HUMAN_AGENT، ثم ACCOUNT_UPDATE كحل أخير.
+    نسخة معدلة تضع التاج في المستوى العلوي (Top Level) لاجبار ManyChat على قبوله
     """
     debug("📤 Sending ManyChat Reply", {
         "subscriber_id": subscriber_id,
@@ -253,7 +253,7 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
     channel = "instagram" if platform == "Instagram" else "facebook"
     url = "https://api.manychat.com/fb/sending/sendContent"
     
-    # التاج الأساسي
+    # تحديد التاج المناسب
     effective_tag = "HUMAN_AGENT" if platform == "Instagram" else "post_sale"
 
     headers = {
@@ -261,7 +261,7 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
         "Content-Type": "application/json"
     }
 
-    # 1. المحاولة الأولى: بدون تاجات (الطبيعي)
+    # 1. المحاولة الأولى: إرسال نظيف (بدون تاج)
     base_payload = {
         "subscriber_id": str(subscriber_id),
         "channel": channel,
@@ -279,28 +279,29 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
         debug("❌ Network error", str(e))
         return {"ok": False, "error": str(e)}
 
-    # لو نجح تمام
+    # لو نجح من أول مرة
     if r.status_code == 200:
         debug("✅ Message Sent Successfully", r.status_code)
         return {"ok": True, "status": r.status_code, "body": r.text}
 
-    # 2. لو فشل بسبب الـ 24 ساعة (Code 3011 أو غيره)
+    # 2. المحاولة الثانية: عند حدوث خطأ الـ 24 ساعة
     error_str = r.text.lower()
     if r.status_code == 400 and ("3011" in error_str or "window" in error_str or "tag" in error_str):
-        debug(f"⚠️ 24h Error ({platform}) — Retrying with {effective_tag}", error_str)
+        debug(f"⚠️ 24h Error Detected ({platform}) — Retrying with FORCE TAG", error_str)
 
-        # تجهيز Payload مع التاج
+        # === التغيير الجوهري هنا ===
+        # وضعنا message_tag في المستوى العلوي لـ data
         tagged_payload = {
             "subscriber_id": str(subscriber_id),
             "channel": channel,
             "data": {
                 "version": "v2",
+                "message_tag": effective_tag,  # <--- التاج هنا هو مفتاح الحل
                 "content": {
                     "messages": [
                         {
                             "type": "text", 
-                            "text": text_message, 
-                            "tag": effective_tag 
+                            "text": text_message
                         }
                     ]
                 }
@@ -310,14 +311,13 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
         try:
             r2 = requests.post(url, headers=headers, data=json.dumps(tagged_payload), timeout=15)
             
-            # لو نجح المحاولة الثانية
             if r2.status_code == 200:
-                debug("✅ Retry Success", r2.status_code)
+                debug("✅ Retry Success with Top-Level Tag", r2.status_code)
                 return {"ok": True, "status": r2.status_code, "body": r2.text}
-            
-            # 3. المحاولة الثالثة: الحل الأخير (ACCOUNT_UPDATE)
-            debug("⚠️ Retry Failed, trying Backup Tag: ACCOUNT_UPDATE", r2.text)
-            tagged_payload["data"]["content"]["messages"][0]["tag"] = "ACCOUNT_UPDATE"
+
+            # 3. المحاولة الثالثة: تجربة ACCOUNT_UPDATE لو فشل الأول
+            debug("⚠️ Retry Failed, trying ACCOUNT_UPDATE", r2.text)
+            tagged_payload["data"]["message_tag"] = "ACCOUNT_UPDATE"
             
             r3 = requests.post(url, headers=headers, data=json.dumps(tagged_payload), timeout=15)
             return {"ok": r3.status_code == 200, "status": r3.status_code, "body": r3.text}
@@ -475,7 +475,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running with ROBUST IG FIX (Human Agent + Account Update Backup)"
+    return "Bot running with FINAL IG TAG FIX (Top-Level message_tag)"
 
 # ===========================
 # Run
