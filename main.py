@@ -21,7 +21,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-logger.info("▶️ بدء تشغيل التطبيق...")
+logger.info("▶️ بدء تشغيل التطبيق (نسخة رد الفعل السريع)...")
 
 # ===========================
 # DEBUG
@@ -72,7 +72,9 @@ pending_messages = {"Facebook": {}, "Instagram": {}}
 message_timers = {"Facebook": {}, "Instagram": {}}
 run_locks = {"Facebook": {}, "Instagram": {}}
 queue_lock = threading.Lock()
-BATCH_WAIT_TIME = 9.0
+
+# وقت التجميع (ثانيتين كافية جداً)
+BATCH_WAIT_TIME = 2.0 
 RETRY_DELAY_WHEN_BUSY = 3.0
 
 # ===========================
@@ -130,10 +132,9 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
 
     user_id = str(contact_data.get("id"))
     if not user_id:
-        debug("❌ user_id مفقود", "")
         return None
 
-    # اكتشاف المنصة من ManyChat
+    # اكتشاف المنصة
     if platform_hint is None or platform_hint == "ManyChat":
         if contact_data.get("ig_id") or contact_data.get("ig_last_interaction"):
             main_platform = "Instagram"
@@ -161,7 +162,6 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
                 "status": "active"
             }}
         )
-        debug("♻ SESSION UPDATED", session)
         return sessions_collection.find_one({"_id": user_id})
 
     # جلسة جديدة
@@ -184,8 +184,40 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
     }
 
     sessions_collection.insert_one(new_session)
-    debug("🆕 SESSION CREATED", new_session)
     return new_session
+
+# ===========================
+# دالة إرسال إشارة "جاري الكتابة" (الحل السحري)
+# ===========================
+def send_typing_action(subscriber_id, platform):
+    """
+    بتبعت إشارة لـ ManyChat فوراً عشان "تفتح الشات" وتعرف العميل إننا موجودين.
+    """
+    debug("⚡ Sending Typing/Open Signal...", {"user": subscriber_id})
+    
+    url = "https://api.manychat.com/fb/sending/sendContent"
+    headers = {
+        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # محاولة إرسال أكشن (Typing) لإنعاش المحادثة
+    # ملاحظة: حتى لو ماني شات مردش عليها، مجرد الطلب بيصحصح السيرفر
+    payload = {
+        "subscriber_id": str(subscriber_id),
+        "data": {
+            "version": "v2",
+            "content": {
+                "type": "typing_on" # محاولة إظهار "جاري الكتابة"
+            }
+        }
+    }
+    
+    try:
+        # بنبعت الطلب ونتجاهل الرد عشان منضيعش وقت
+        requests.post(url, headers=headers, data=json.dumps(payload), timeout=2)
+    except:
+        pass
 
 # ===========================
 # OpenAI Assistant
@@ -200,7 +232,6 @@ async def get_assistant_reply_async(session, content):
         thread = await asyncio.to_thread(client.beta.threads.create)
         thread_id = thread.id
         sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
-        debug("🧵 NEW THREAD CREATED", {"thread_id": thread_id})
 
     await asyncio.to_thread(
         client.beta.threads.messages.create,
@@ -233,21 +264,15 @@ async def get_assistant_reply_async(session, content):
         limit=1
     )
     reply = msgs.data[0].content[0].text.value.strip()
-
-    debug("💬 Assistant Reply Ready", reply)
     return reply
 
 # ===========================
-# إرسال ManyChat (نسخة المحارب الشاملة)
+# إرسال ManyChat (المحارب)
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUMAN_AGENT"):
-    """
-    تحاول الإرسال بـ 3 استراتيجيات مختلفة و 3 تاجات مختلفة لضمان الوصول.
-    """
     debug("📤 Sending ManyChat Reply", {
         "subscriber_id": subscriber_id,
-        "message": text_message,
-        "platform": platform
+        "message": text_message
     })
 
     channel = "instagram" if platform == "Instagram" else "facebook"
@@ -258,9 +283,7 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
         "Content-Type": "application/json"
     }
 
-    # ==========================================
-    # المحاولة 1: الإرسال الطبيعي (Clean Send)
-    # ==========================================
+    # 1. إرسال عادي
     payload_1 = {
         "subscriber_id": str(subscriber_id),
         "channel": channel,
@@ -276,22 +299,15 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
         r = requests.post(url, headers=headers, data=json.dumps(payload_1), timeout=15)
         if r.status_code == 200:
             debug("✅ Sent Normally", r.status_code)
-            return {"ok": True, "status": 200, "body": r.text}
+            return {"ok": True}
     except Exception as e:
-        debug("❌ Network Error (Normal Send)", str(e))
+        debug("❌ Network Error", str(e))
 
-    # ==========================================
-    # المحاولة 2: الهجوم بالتاجات (HUMAN_AGENT, ACCOUNT_UPDATE, CONFIRMED_EVENT_UPDATE)
-    # ==========================================
-    debug("⚠️ Normal send failed/rejected. Starting FORCE TAG sequence...", "")
-
-    # قائمة التاجات بالترتيب من الأقوى للأضعف
+    # 2. الهجوم بالتاجات
+    debug("⚠️ Retry with FORCE TAGS...", "")
     tags_to_try = ["HUMAN_AGENT", "ACCOUNT_UPDATE", "CONFIRMED_EVENT_UPDATE"]
     
     for tag in tags_to_try:
-        debug(f"🔄 Trying Tag: {tag}", "")
-        
-        # وضع التاج في المستوى العلوي (Top Level) والمستوى الداخلي (Message Level)
         payload_force = {
             "subscriber_id": str(subscriber_id),
             "channel": channel,
@@ -309,21 +325,15 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
                 }
             }
         }
-
         try:
             r2 = requests.post(url, headers=headers, data=json.dumps(payload_force), timeout=15)
             if r2.status_code == 200:
-                debug(f"✅ Success with tag: {tag}", r2.text)
-                return {"ok": True, "status": 200, "body": r2.text}
-            else:
-                 debug(f"❌ Failed with {tag}", r2.text)
-        except Exception as e:
+                debug(f"✅ Success with {tag}", r2.status_code)
+                return {"ok": True}
+        except:
             pass
 
-    # ==========================================
-    # المحاولة 3 (الحل الأخير): JSON مسطح (V1 Style)
-    # ==========================================
-    debug("⚠️ All v2 tags failed. Trying v1 style payload...", "")
+    # 3. Legacy
     payload_v1 = {
         "subscriber_id": str(subscriber_id),
         "data": {
@@ -332,19 +342,14 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
                 "messages": [{"type": "text", "text": text_message}]
             }
         },
-        "message_tag": "HUMAN_AGENT" # وضع التاج خارج الـ data أحياناً ينفع في النسخ القديمة
+        "message_tag": "HUMAN_AGENT"
     }
-    
     try:
-        r3 = requests.post(url, headers=headers, data=json.dumps(payload_v1), timeout=15)
-        if r3.status_code == 200:
-             debug("✅ Success with v1 Style", r3.text)
-             return {"ok": True, "status": 200, "body": r3.text}
-    except Exception as e:
+        requests.post(url, headers=headers, data=json.dumps(payload_v1), timeout=15)
+    except:
         pass
 
-    debug("❌ All methods failed. ManyChat permissions are strictly blocked.", "")
-    return {"ok": False, "error": "All tags rejected"}
+    return {"ok": False}
 
 # ===========================
 # Queue System
@@ -395,6 +400,13 @@ def add_to_queue(session, text):
     })
 
     with queue_lock:
+        # ========================================================
+        # اللمسة السحرية: لو دي أول رسالة، ابعت "إشارة" لماني شات فوراً
+        # ========================================================
+        if uid not in pending_messages[platform]:
+            # بنشغلها في ثريد عشان متعطلش الكود
+            threading.Thread(target=send_typing_action, args=(uid, platform)).start()
+
         if uid not in pending_messages[platform]:
             pending_messages[platform][uid] = {"texts": [], "session": session}
 
@@ -406,6 +418,7 @@ def add_to_queue(session, text):
             except:
                 pass
 
+        # التايمر للتجميع (2 ثانية)
         timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[platform, uid])
         message_timers[platform][uid] = timer
         timer.start()
@@ -413,7 +426,7 @@ def add_to_queue(session, text):
         debug("⏳ QUEUE UPDATED", {
             "platform": platform,
             "user": uid,
-            "pending_texts": pending_messages[platform][uid]["texts"]
+            "note": "Typing signal sent immediately"
         })
 
 # ===========================
@@ -426,7 +439,6 @@ def mc_webhook():
     if MANYCHAT_SECRET_KEY:
         auth = request.headers.get("Authorization")
         if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
-            debug("❌ Unauthorized Webhook", auth)
             return jsonify({"error": "unauthorized"}), 403
 
     data = request.get_json()
@@ -434,45 +446,18 @@ def mc_webhook():
 
     contact = data.get("full_contact")
     if not contact:
-        debug("❌ Missing Contact", "")
         return jsonify({"error": "missing contact"}), 400
 
     user_id = str(contact.get("id"))
     existing_session = sessions_collection.find_one({"_id": user_id})
 
-    # ===========================
-    # IG DEBUG BLOCK
-    # ===========================
-    debug("📌 IG DEBUG CHECKPOINT", {
-        "user_id": user_id,
-        "ig_id": contact.get("ig_id"),
-        "ig_last_interaction": contact.get("ig_last_interaction"),
-        "session_platform": existing_session["platform"] if existing_session else None,
-        "detected_platform": "Instagram" if (contact.get("ig_id") or contact.get("ig_last_interaction")) else "Facebook",
-        "last_text_input": contact.get("last_text_input"),
-        "last_input_text": contact.get("last_input_text"),
-        "last_input": contact.get("last_input"),
-    })
-
-    # ===========================
-    # حماية إنستغرام من FB Webhook
-    # ===========================
+    # حماية إنستغرام
     if existing_session and existing_session["platform"] == "Instagram" and not contact.get("ig_id"):
-        debug("⛔ IG BLOCK TRIGGERED", {
-            "reason": "Webhook جاء بدون ig_id",
-            "existing_session": existing_session,
-            "contact": contact
-        })
+        debug("⛔ IG BLOCK TRIGGERED", "No IG ID")
         return jsonify({"ignored": True}), 200
 
-    # ===========================
-    # جلسة جديدة / تحديث
-    # ===========================
     session = get_or_create_session_from_contact(contact, platform_hint="ManyChat")
 
-    # ===========================
-    # استخراج النص
-    # ===========================
     txt = (
         contact.get("last_text_input")
         or contact.get("last_input_text")
@@ -493,7 +478,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running with WARRIOR MODE (Trying All Tags)"
+    return "Bot running with INSTANT SIGNAL & WARRIOR SENDING"
 
 # ===========================
 # Run
