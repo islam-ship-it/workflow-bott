@@ -238,11 +238,11 @@ async def get_assistant_reply_async(session, content):
     return reply
 
 # ===========================
-# إرسال ManyChat (الحل الجذري لمشكلة إنستجرام)
+# إرسال ManyChat (نسخة المحارب الشاملة)
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUMAN_AGENT"):
     """
-    نسخة معدلة تضع التاج في المستوى العلوي (Top Level) لاجبار ManyChat على قبوله
+    تحاول الإرسال بـ 3 استراتيجيات مختلفة و 3 تاجات مختلفة لضمان الوصول.
     """
     debug("📤 Sending ManyChat Reply", {
         "subscriber_id": subscriber_id,
@@ -253,16 +253,15 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
     channel = "instagram" if platform == "Instagram" else "facebook"
     url = "https://api.manychat.com/fb/sending/sendContent"
     
-    # تحديد التاج المناسب
-    effective_tag = "HUMAN_AGENT" if platform == "Instagram" else "post_sale"
-
     headers = {
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # 1. المحاولة الأولى: إرسال نظيف (بدون تاج)
-    base_payload = {
+    # ==========================================
+    # المحاولة 1: الإرسال الطبيعي (Clean Send)
+    # ==========================================
+    payload_1 = {
         "subscriber_id": str(subscriber_id),
         "channel": channel,
         "data": {
@@ -274,34 +273,37 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
     }
 
     try:
-        r = requests.post(url, headers=headers, data=json.dumps(base_payload), timeout=15)
+        r = requests.post(url, headers=headers, data=json.dumps(payload_1), timeout=15)
+        if r.status_code == 200:
+            debug("✅ Sent Normally", r.status_code)
+            return {"ok": True, "status": 200, "body": r.text}
     except Exception as e:
-        debug("❌ Network error", str(e))
-        return {"ok": False, "error": str(e)}
+        debug("❌ Network Error (Normal Send)", str(e))
 
-    # لو نجح من أول مرة
-    if r.status_code == 200:
-        debug("✅ Message Sent Successfully", r.status_code)
-        return {"ok": True, "status": r.status_code, "body": r.text}
+    # ==========================================
+    # المحاولة 2: الهجوم بالتاجات (HUMAN_AGENT, ACCOUNT_UPDATE, CONFIRMED_EVENT_UPDATE)
+    # ==========================================
+    debug("⚠️ Normal send failed/rejected. Starting FORCE TAG sequence...", "")
 
-    # 2. المحاولة الثانية: عند حدوث خطأ الـ 24 ساعة
-    error_str = r.text.lower()
-    if r.status_code == 400 and ("3011" in error_str or "window" in error_str or "tag" in error_str):
-        debug(f"⚠️ 24h Error Detected ({platform}) — Retrying with FORCE TAG", error_str)
-
-        # === التغيير الجوهري هنا ===
-        # وضعنا message_tag في المستوى العلوي لـ data
-        tagged_payload = {
+    # قائمة التاجات بالترتيب من الأقوى للأضعف
+    tags_to_try = ["HUMAN_AGENT", "ACCOUNT_UPDATE", "CONFIRMED_EVENT_UPDATE"]
+    
+    for tag in tags_to_try:
+        debug(f"🔄 Trying Tag: {tag}", "")
+        
+        # وضع التاج في المستوى العلوي (Top Level) والمستوى الداخلي (Message Level)
+        payload_force = {
             "subscriber_id": str(subscriber_id),
             "channel": channel,
             "data": {
                 "version": "v2",
-                "message_tag": effective_tag,  # <--- التاج هنا هو مفتاح الحل
+                "message_tag": tag, 
                 "content": {
                     "messages": [
                         {
                             "type": "text", 
-                            "text": text_message
+                            "text": text_message,
+                            "tag": tag 
                         }
                     ]
                 }
@@ -309,24 +311,40 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
         }
 
         try:
-            r2 = requests.post(url, headers=headers, data=json.dumps(tagged_payload), timeout=15)
-            
+            r2 = requests.post(url, headers=headers, data=json.dumps(payload_force), timeout=15)
             if r2.status_code == 200:
-                debug("✅ Retry Success with Top-Level Tag", r2.status_code)
-                return {"ok": True, "status": r2.status_code, "body": r2.text}
-
-            # 3. المحاولة الثالثة: تجربة ACCOUNT_UPDATE لو فشل الأول
-            debug("⚠️ Retry Failed, trying ACCOUNT_UPDATE", r2.text)
-            tagged_payload["data"]["message_tag"] = "ACCOUNT_UPDATE"
-            
-            r3 = requests.post(url, headers=headers, data=json.dumps(tagged_payload), timeout=15)
-            return {"ok": r3.status_code == 200, "status": r3.status_code, "body": r3.text}
-
+                debug(f"✅ Success with tag: {tag}", r2.text)
+                return {"ok": True, "status": 200, "body": r2.text}
+            else:
+                 debug(f"❌ Failed with {tag}", r2.text)
         except Exception as e:
-            debug("❌ Network error on retry", str(e))
-            return {"ok": False, "error": str(e)}
+            pass
 
-    return {"ok": False, "status": r.status_code, "body": r.text}
+    # ==========================================
+    # المحاولة 3 (الحل الأخير): JSON مسطح (V1 Style)
+    # ==========================================
+    debug("⚠️ All v2 tags failed. Trying v1 style payload...", "")
+    payload_v1 = {
+        "subscriber_id": str(subscriber_id),
+        "data": {
+            "version": "v2",
+            "content": {
+                "messages": [{"type": "text", "text": text_message}]
+            }
+        },
+        "message_tag": "HUMAN_AGENT" # وضع التاج خارج الـ data أحياناً ينفع في النسخ القديمة
+    }
+    
+    try:
+        r3 = requests.post(url, headers=headers, data=json.dumps(payload_v1), timeout=15)
+        if r3.status_code == 200:
+             debug("✅ Success with v1 Style", r3.text)
+             return {"ok": True, "status": 200, "body": r3.text}
+    except Exception as e:
+        pass
+
+    debug("❌ All methods failed. ManyChat permissions are strictly blocked.", "")
+    return {"ok": False, "error": "All tags rejected"}
 
 # ===========================
 # Queue System
@@ -475,7 +493,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running with FINAL IG TAG FIX (Top-Level message_tag)"
+    return "Bot running with WARRIOR MODE (Trying All Tags)"
 
 # ===========================
 # Run
