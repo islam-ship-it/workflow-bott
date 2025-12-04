@@ -243,9 +243,13 @@ async def get_assistant_reply_async(session, content):
     return reply
 
 # ===========================
-# إرسال ManyChat
+# إرسال ManyChat (مع إصلاح مشكلة 24 ساعة بالـ tag fallback)
 # ===========================
-def send_manychat_reply(subscriber_id, text_message, platform):
+def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="post_sale"):
+    """
+    يحاول أولًا إرسال رسالة عادية. لو ManyChat رجع خطأ 3011 (خارج نافذة الـ 24 ساعة)
+    يعيد المحاولة مع إضافة الحقل 'tag' داخل كل رسالة (مثال: "post_sale").
+    """
     debug("📤 Sending ManyChat Reply", {
         "subscriber_id": subscriber_id,
         "message": text_message,
@@ -255,7 +259,8 @@ def send_manychat_reply(subscriber_id, text_message, platform):
     channel = "instagram" if platform == "Instagram" else "facebook"
     url = "https://api.manychat.com/fb/sending/sendContent"
 
-    payload = {
+    # payload بدون tag أولًا (يحافظ على السلوك الحالي لو الرسائل ضمن الـ24 ساعة)
+    base_payload = {
         "subscriber_id": str(subscriber_id),
         "channel": channel,
         "data": {
@@ -271,8 +276,49 @@ def send_manychat_reply(subscriber_id, text_message, platform):
         "Content-Type": "application/json"
     }
 
-    r = requests.post(url, headers=headers, data=json.dumps(payload))
+    try:
+        r = requests.post(url, headers=headers, data=json.dumps(base_payload), timeout=15)
+    except Exception as e:
+        debug("❌ Network error when sending to ManyChat", str(e))
+        return {"ok": False, "error": str(e)}
+
     debug("📥 MANYCHAT RESPONSE", {"status": r.status_code, "body": r.text})
+
+    # If success -> return
+    if r.status_code == 200:
+        return {"ok": True, "status": r.status_code, "body": r.text}
+
+    # If ManyChat returned 400 with code 3011 -> retry with message tag (post_sale)
+    try:
+        body_json = r.json()
+    except Exception:
+        body_json = {"raw": r.text}
+
+    if r.status_code == 400 and (str(body_json).find("3011") != -1 or "24 ساعة" in r.text or "last interaction" in r.text):
+        debug("⚠️ ManyChat 24h window error detected — retrying with tag", {"original_response": body_json})
+
+        tagged_payload = {
+            "subscriber_id": str(subscriber_id),
+            "channel": channel,
+            "data": {
+                "version": "v2",
+                "content": {
+                    # Important: add "tag" field inside each message as manychat expects in some flows
+                    "messages": [{"type": "text", "text": text_message, "tag": fallback_tag}]
+                }
+            }
+        }
+
+        try:
+            r2 = requests.post(url, headers=headers, data=json.dumps(tagged_payload), timeout=15)
+            debug("📥 MANYCHAT RETRY RESPONSE", {"status": r2.status_code, "body": r2.text})
+            return {"ok": r2.status_code == 200, "status": r2.status_code, "body": r2.text}
+        except Exception as e:
+            debug("❌ Network error on retry with tag", str(e))
+            return {"ok": False, "error": str(e)}
+
+    # For other errors, return raw response
+    return {"ok": False, "status": r.status_code, "body": r.text}
 
 # ===========================
 # Queue System
