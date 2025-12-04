@@ -107,7 +107,7 @@ async def get_image_description_for_assistant(base64_image):
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
-            model="gpt-4o",  # تم التحديث لأحدث موديل متاح
+            model="gpt-4o",
             messages=[{
                 "role": "user",
                 "content": [
@@ -238,12 +238,11 @@ async def get_assistant_reply_async(session, content):
     return reply
 
 # ===========================
-# إرسال ManyChat (تم التعديل لحل مشكلة إنستجرام)
+# إرسال ManyChat (القوي والمحسن لإنستجرام)
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUMAN_AGENT"):
     """
-    يحاول أولًا إرسال رسالة عادية. لو ManyChat رجع خطأ خاص بالـ 24 ساعة،
-    يعيد المحاولة مع إضافة التاج المناسب للمنصة.
+    نسخة قوية: تحاول الإرسال النظيف، ثم HUMAN_AGENT، ثم ACCOUNT_UPDATE كحل أخير.
     """
     debug("📤 Sending ManyChat Reply", {
         "subscriber_id": subscriber_id,
@@ -254,10 +253,15 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
     channel = "instagram" if platform == "Instagram" else "facebook"
     url = "https://api.manychat.com/fb/sending/sendContent"
     
-    # تحديد التاج المناسب: إنستجرام يحتاج HUMAN_AGENT حصرياً لتجاوز النافذة
+    # التاج الأساسي
     effective_tag = "HUMAN_AGENT" if platform == "Instagram" else "post_sale"
 
-    # 1. المحاولة الأولى: Payload نظيف (بدون tag) للحالات العادية
+    headers = {
+        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    # 1. المحاولة الأولى: بدون تاجات (الطبيعي)
     base_payload = {
         "subscriber_id": str(subscriber_id),
         "channel": channel,
@@ -269,54 +273,59 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
         }
     }
 
-    headers = {
-        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
     try:
         r = requests.post(url, headers=headers, data=json.dumps(base_payload), timeout=15)
     except Exception as e:
-        debug("❌ Network error when sending to ManyChat", str(e))
+        debug("❌ Network error", str(e))
         return {"ok": False, "error": str(e)}
 
-    # لو نجح -> تمام
+    # لو نجح تمام
     if r.status_code == 200:
         debug("✅ Message Sent Successfully", r.status_code)
         return {"ok": True, "status": r.status_code, "body": r.text}
 
-    # 2. المحاولة الثانية: لو فشل وظهر خطأ يشير للنافذة الزمنية
-    # الأكواد الشائعة: 3011، أو رسالة "Outside 24 hours window"
-    try:
-        body_json = r.json()
-    except:
-        body_json = {"raw": r.text}
-
+    # 2. لو فشل بسبب الـ 24 ساعة (Code 3011 أو غيره)
     error_str = r.text.lower()
-    if r.status_code == 400 and ("3011" in error_str or "24" in error_str or "window" in error_str or "interaction" in error_str):
-        debug(f"⚠️ 24h Window Error Detected ({platform}) — Retrying with tag: {effective_tag}", body_json)
+    if r.status_code == 400 and ("3011" in error_str or "window" in error_str or "tag" in error_str):
+        debug(f"⚠️ 24h Error ({platform}) — Retrying with {effective_tag}", error_str)
 
+        # تجهيز Payload مع التاج
         tagged_payload = {
             "subscriber_id": str(subscriber_id),
             "channel": channel,
             "data": {
                 "version": "v2",
                 "content": {
-                    # إضافة التاج هنا هو الحل السحري
-                    "messages": [{"type": "text", "text": text_message, "tag": effective_tag}]
+                    "messages": [
+                        {
+                            "type": "text", 
+                            "text": text_message, 
+                            "tag": effective_tag 
+                        }
+                    ]
                 }
             }
         }
 
         try:
             r2 = requests.post(url, headers=headers, data=json.dumps(tagged_payload), timeout=15)
-            debug("📥 MANYCHAT RETRY RESPONSE", {"status": r2.status_code, "body": r2.text})
-            return {"ok": r2.status_code == 200, "status": r2.status_code, "body": r2.text}
+            
+            # لو نجح المحاولة الثانية
+            if r2.status_code == 200:
+                debug("✅ Retry Success", r2.status_code)
+                return {"ok": True, "status": r2.status_code, "body": r2.text}
+            
+            # 3. المحاولة الثالثة: الحل الأخير (ACCOUNT_UPDATE)
+            debug("⚠️ Retry Failed, trying Backup Tag: ACCOUNT_UPDATE", r2.text)
+            tagged_payload["data"]["content"]["messages"][0]["tag"] = "ACCOUNT_UPDATE"
+            
+            r3 = requests.post(url, headers=headers, data=json.dumps(tagged_payload), timeout=15)
+            return {"ok": r3.status_code == 200, "status": r3.status_code, "body": r3.text}
+
         except Exception as e:
-            debug("❌ Network error on retry with tag", str(e))
+            debug("❌ Network error on retry", str(e))
             return {"ok": False, "error": str(e)}
 
-    # لأي خطأ آخر
     return {"ok": False, "status": r.status_code, "body": r.text}
 
 # ===========================
@@ -466,7 +475,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running with FULL IG DEBUG – FB & IG isolated"
+    return "Bot running with ROBUST IG FIX (Human Agent + Account Update Backup)"
 
 # ===========================
 # Run
