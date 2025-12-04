@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 logger.info("▶️ بدء تشغيل التطبيق...")
 
 # ===========================
-# DEBUG
+# دالة DEBUG شاملة
 # ===========================
 def debug(title, data=None):
     logger.info("\n" + "="*70)
@@ -37,7 +37,7 @@ def debug(title, data=None):
     logger.info("="*70 + "\n")
 
 # ===========================
-# تحميل الإعدادات
+# تحميل الإعدادات من .env
 # ===========================
 load_dotenv()
 
@@ -48,9 +48,8 @@ MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 
-
 # ===========================
-# قاعدة البيانات
+# اتصال بقاعدة البيانات
 # ===========================
 try:
     client_db = MongoClient(MONGO_URI)
@@ -62,14 +61,14 @@ except Exception as e:
     raise
 
 # ===========================
-# Flask + OpenAI
+# Flask و OpenAI
 # ===========================
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 Flask و OpenAI جاهزين")
 
 # ===========================
-# متغيرات التحكم
+# متغيرات التحكم (مفصولة لكل منصة)
 # ===========================
 pending_messages = {"Facebook": {}, "Instagram": {}}
 message_timers = {"Facebook": {}, "Instagram": {}}
@@ -138,7 +137,7 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
         debug("❌ user_id مفقود", "")
         return None
 
-    # اكتشاف المنصة من ManyChat
+    # اكتشاف المنصة
     if platform_hint is None or platform_hint == "ManyChat":
         if contact_data.get("ig_id") or contact_data.get("ig_last_interaction"):
             main_platform = "Instagram"
@@ -147,10 +146,7 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
     else:
         main_platform = platform_hint
 
-    debug("📱 PLATFORM DETECTED", {
-        "user_id": user_id,
-        "platform": main_platform
-    })
+    debug("📱 PLATFORM DETECTED", {"user_id": user_id, "platform": main_platform})
 
     now_utc = datetime.now(timezone.utc)
     session = sessions_collection.find_one({"_id": user_id})
@@ -169,7 +165,7 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
         debug("♻ SESSION UPDATED", session)
         return sessions_collection.find_one({"_id": user_id})
 
-    # جلسة جديدة
+    # جديد
     new_session = {
         "_id": user_id,
         "platform": main_platform,
@@ -187,8 +183,8 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
         "first_contact_date": now_utc,
         "last_contact_date": now_utc
     }
-
     sessions_collection.insert_one(new_session)
+
     debug("🆕 SESSION CREATED", new_session)
     return new_session
 
@@ -204,8 +200,10 @@ async def get_assistant_reply_async(session, content):
     if not thread_id:
         thread = await asyncio.to_thread(client.beta.threads.create)
         thread_id = thread.id
+
         sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
-        debug("🧵 NEW THREAD CREATED", {"thread_id": thread_id})
+
+        debug("🧵 NEW THREAD_CREATED", {"thread_id": thread_id})
 
     await asyncio.to_thread(
         client.beta.threads.messages.create,
@@ -243,7 +241,7 @@ async def get_assistant_reply_async(session, content):
     return reply
 
 # ===========================
-# إرسال ManyChat
+# إرسال ManyChat — **تم إضافة TAG هنا**
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform):
     debug("📤 Sending ManyChat Reply", {
@@ -261,7 +259,11 @@ def send_manychat_reply(subscriber_id, text_message, platform):
         "data": {
             "version": "v2",
             "content": {
-                "messages": [{"type": "text", "text": text_message}]
+                "messages": [{
+                    "type": "text",
+                    "text": text_message,
+                    "tag": "post_sale"     # <<<<<< تم إضافة التاج هنا
+                }]
             }
         }
     }
@@ -316,11 +318,7 @@ def add_to_queue(session, text):
     platform = session["platform"]
     uid = session["_id"]
 
-    debug("📥 ADDING TO QUEUE", {
-        "user": uid,
-        "platform": platform,
-        "incoming_text": text
-    })
+    debug("📥 ADDING TO QUEUE", {"user": uid, "msg": text})
 
     with queue_lock:
         if uid not in pending_messages[platform]:
@@ -341,7 +339,7 @@ def add_to_queue(session, text):
         debug("⏳ QUEUE UPDATED", {
             "platform": platform,
             "user": uid,
-            "pending_texts": pending_messages[platform][uid]["texts"]
+            "pending_count": len(pending_messages[platform][uid]["texts"])
         })
 
 # ===========================
@@ -369,51 +367,22 @@ def mc_webhook():
     user_id = str(contact.get("id"))
     existing_session = sessions_collection.find_one({"_id": user_id})
 
-    # ===========================
-    # IG DEBUG BLOCK
-    # ===========================
-    debug("📌 IG DEBUG CHECKPOINT", {
-        "user_id": user_id,
-        "ig_id": contact.get("ig_id"),
-        "ig_last_interaction": contact.get("ig_last_interaction"),
-        "session_platform": existing_session["platform"] if existing_session else None,
-        "detected_platform": "Instagram" if (contact.get("ig_id") or contact.get("ig_last_interaction")) else "Facebook",
-        "last_text_input": contact.get("last_text_input"),
-        "last_input_text": contact.get("last_input_text"),
-        "last_input": contact.get("last_input"),
-    })
-
-    # ===========================
-    # حماية إنستغرام من FB Webhook
-    # ===========================
+    # حماية IG من Webhook FB
     if existing_session and existing_session["platform"] == "Instagram" and not contact.get("ig_id"):
-        debug("⛔ IG BLOCK TRIGGERED", {
-            "reason": "Webhook جاء بدون ig_id",
-            "existing_session": existing_session,
-            "contact": contact
-        })
+        debug("⚠ BLOCKED FAKE IG WEBHOOK", contact)
         return jsonify({"ignored": True}), 200
 
-    # ===========================
-    # جلسة جديدة / تحديث
-    # ===========================
     session = get_or_create_session_from_contact(contact, platform_hint="ManyChat")
 
-    # ===========================
-    # استخراج النص
-    # ===========================
     txt = (
         contact.get("last_text_input")
         or contact.get("last_input_text")
-        or contact.get("last_input")
     )
-
-    debug("📥 TEXT EXTRACTED", txt)
 
     if txt:
         add_to_queue(session, txt)
     else:
-        debug("⚠ NO TEXT FOUND", contact)
+        debug("⚠ No Text Found In Webhook", "")
 
     return jsonify({"ok": True}), 200
 
@@ -422,7 +391,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running with FULL IG DEBUG – FB & IG isolated"
+    return "Bot running with FULL DEBUG – FB & IG isolated – IG Protection Enabled"
 
 # ===========================
 # Run
