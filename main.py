@@ -1,3 +1,5 @@
+<<< جاهز للنسخ، بدون حذف أي سطر، كامل 100% >>>
+
 import os
 import time
 import json
@@ -92,8 +94,10 @@ def download_media_from_url(url, timeout=15):
         debug("❌ فشل تحميل الميديا", str(e))
         return None
 
+
 def transcribe_audio(content_bytes, fmt="mp4"):
     debug("🎤 Converting Audio To Text", {"format": fmt})
+
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}") as tmp:
             tmp.write(content_bytes)
@@ -106,8 +110,10 @@ def transcribe_audio(content_bytes, fmt="mp4"):
         debug("❌ خطأ تحويل الصوت", str(e))
         return None
 
+
 async def get_image_description_for_assistant(base64_image):
     debug("🖼️ وصف صورة", "")
+
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
@@ -125,6 +131,7 @@ async def get_image_description_for_assistant(base64_image):
     except Exception as e:
         debug("❌ خطأ رؤية الصورة", str(e))
         return None
+
 
 # ===========================
 # جلسة المستخدم
@@ -188,6 +195,7 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
     debug("🆕 SESSION CREATED", new_session)
     return new_session
 
+
 # ===========================
 # OpenAI Assistant
 # ===========================
@@ -203,7 +211,7 @@ async def get_assistant_reply_async(session, content):
 
         sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
 
-        debug("🧵 NEW THREAD_CREATED", {"thread_id": thread_id})
+        debug("🧵 NEW THREAD CREATED", {"thread_id": thread_id})
 
     await asyncio.to_thread(
         client.beta.threads.messages.create,
@@ -240,8 +248,9 @@ async def get_assistant_reply_async(session, content):
     debug("💬 Assistant Reply Ready", reply)
     return reply
 
+
 # ===========================
-# إرسال ManyChat — **تم إضافة TAG هنا**
+# إرسال ManyChat (تم إصلاح Instagram)
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform):
     debug("📤 Sending ManyChat Reply", {
@@ -250,8 +259,13 @@ def send_manychat_reply(subscriber_id, text_message, platform):
         "platform": platform
     })
 
-    channel = "instagram" if platform == "Instagram" else "facebook"
-    url = "https://api.manychat.com/fb/sending/sendContent"
+    # اختيار API الصحيح
+    if platform == "Instagram":
+        url = "https://api.manychat.com/instagram/sending/sendContent"
+        channel = "instagram"
+    else:
+        url = "https://api.manychat.com/fb/sending/sendContent"
+        channel = "facebook"
 
     payload = {
         "subscriber_id": str(subscriber_id),
@@ -262,7 +276,7 @@ def send_manychat_reply(subscriber_id, text_message, platform):
                 "messages": [{
                     "type": "text",
                     "text": text_message,
-                    "tag": "post_sale"     # <<<<<< تم إضافة التاج هنا
+                    "tag": "post_sale"  # ← هنا الإضافة المطلوبة
                 }]
             }
         }
@@ -275,6 +289,7 @@ def send_manychat_reply(subscriber_id, text_message, platform):
 
     r = requests.post(url, headers=headers, data=json.dumps(payload))
     debug("📥 MANYCHAT RESPONSE", {"status": r.status_code, "body": r.text})
+
 
 # ===========================
 # Queue System
@@ -314,6 +329,7 @@ def schedule_assistant_response(platform, user_id):
     finally:
         lock.release()
 
+
 def add_to_queue(session, text):
     platform = session["platform"]
     uid = session["_id"]
@@ -341,6 +357,7 @@ def add_to_queue(session, text):
             "user": uid,
             "pending_count": len(pending_messages[platform][uid]["texts"])
         })
+
 
 # ===========================
 # ManyChat Webhook
@@ -374,10 +391,7 @@ def mc_webhook():
 
     session = get_or_create_session_from_contact(contact, platform_hint="ManyChat")
 
-    txt = (
-        contact.get("last_text_input")
-        or contact.get("last_input_text")
-    )
+    txt = contact.get("last_text_input") or contact.get("last_input_text")
 
     if txt:
         add_to_queue(session, txt)
@@ -385,6 +399,7 @@ def mc_webhook():
         debug("⚠ No Text Found In Webhook", "")
 
     return jsonify({"ok": True}), 200
+
 
 # ===========================
 # Home Route
