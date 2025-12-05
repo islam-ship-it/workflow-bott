@@ -227,17 +227,17 @@ def send_typing_action(subscriber_id, platform):
 # OpenAI Assistant (Responses + Conversations)
 # ===========================
 async def get_assistant_reply_async(session, content):
-    debug("🤖 Responses+Conversations Processing", {"user": session["_id"]})
+    debug("🤖 Responses + Conversations Processing", {"user": session["_id"]})
 
     user_id = session["_id"]
     conversation_id = session.get("openai_conversation_id")
 
-    # 1) لو مفيش Conversation: أنشئ واحد
+    # 1) إنشاء Conversation لو مش موجود
     if not conversation_id:
         try:
             conv = await asyncio.to_thread(
                 client.conversations.create,
-                items=[],  # ننشئ محادثة فاضية في البداية
+                items=[],
                 metadata={"user_id": user_id}
             )
             conversation_id = conv.id
@@ -245,15 +245,13 @@ async def get_assistant_reply_async(session, content):
                 {"_id": user_id},
                 {"$set": {"openai_conversation_id": conversation_id}}
             )
-            debug("✅ Created new conversation", {"conversation_id": conversation_id})
+            debug("✅ تم إنشاء محادثة جديدة", {"conversation_id": conversation_id})
         except Exception as e:
-            debug("❌ Failed to create conversation", str(e))
-            # محاولة المتابعة بدون conversation (fallback)
+            debug("❌ فشل إنشاء المحادثة", str(e))
             conversation_id = None
 
-    # 2) بناء payload للـ Responses API باستخدام الـ prompt اللي انت محدده
+    # 2) بناء الـ Payload الصحيح
     payload = {
-        "model": "gpt-4.1",   # تأكد لو عايز موديل مختلف غيّره هنا
         "prompt": {
             "id": "pmpt_691df223bd3881909e4e9c544a56523b006e1332a5ce0f11",
             "version": "1"
@@ -264,65 +262,45 @@ async def get_assistant_reply_async(session, content):
                 "content": content
             }
         ],
-        "reasoning": {"summary": "auto"},
         "store": True,
-        "include": [
-            "reasoning.encrypted_content",
-            "web_search_call.action.sources"
-        ]
+        "reasoning": {"summary": "auto"}
     }
 
-    # أضف conversation إذا متاح (هذا يضمن السياق وذاكرة المحادثة)
+    # إضافة Conversation ID لو موجود (لعمل سياق للمحادثة)
     if conversation_id:
         payload["conversation"] = conversation_id
 
     try:
-        # 3) استدعاء Responses API بشكل متوافق مع asyncio
-        response = await asyncio.to_thread(client.responses.create, **payload)
+        # 3) تنفيذ الطلب بشكل Async
+        response = await asyncio.to_thread(
+            client.responses.create,
+            **payload
+        )
 
-        # 4) استخراج النص النهائي بطريقة متوافقة مع SDK
+        # 4) استخراج النص النهائي
         reply = None
-        # حاول الطرق المختلفة لاستخراج النص (تعتمد على SDK وإصدارها)
+
+        # الطريقة الأساسية
         if hasattr(response, "output_text") and response.output_text:
             reply = response.output_text
-        else:
-            # response.output قد يحتوي على items
-            try:
-                output_items = getattr(response, "output", None) or []
-                # نحاول إيجاد أول item من النوع text
-                if isinstance(output_items, list) and len(output_items) > 0:
-                    first = output_items[0]
-                    # المحتوى داخل first.get("content") أو first.content
-                    content_list = first.get("content") if isinstance(first, dict) else getattr(first, "content", None)
-                    if content_list:
-                        # ابحث عن content item من نوع output_text
-                        for c in content_list:
-                            # c قد يكون dict أو object حسب SDK
-                            ctype = c.get("type") if isinstance(c, dict) else getattr(c, "type", None)
-                            if ctype == "output_text" or ctype == "message":
-                                text = c.get("text") if isinstance(c, dict) else getattr(c, "text", None)
-                                if isinstance(text, dict):
-                                    # هيكلة قد تكون {"value": "..."}
-                                    val = text.get("value") or text.get("text") or None
-                                else:
-                                    val = text
-                                if val:
-                                    reply = val
-                                    break
-                # آخر محاولة: response.text أو response.output[0].text
-                if not reply:
-                    reply = getattr(response, "text", None) or None
-            except Exception:
-                reply = None
+
+        # fallback في حال تغيّر الهيكل
+        if not reply and hasattr(response, "output"):
+            for item in response.output:
+                content_list = getattr(item, "content", None)
+                if content_list:
+                    for c in content_list:
+                        if c.get("type") == "output_text":
+                            reply = c.get("text", {}).get("value")
+                            break
 
         if not reply:
-            debug("⚠️ Empty reply — full response object", {"response": str(response)})
             return "⚠️ حصل خطأ أثناء توليد الرد."
 
         return reply.strip()
 
     except Exception as e:
-        debug("❌ Responses API Error", str(e))
+        debug("❌ خطأ في Responses API", str(e))
         return "⚠️ حصل خطأ أثناء المعالجة."
 
 # ===========================
