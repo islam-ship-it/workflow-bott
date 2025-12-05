@@ -254,7 +254,7 @@ async def get_assistant_reply_async(session, content):
     payload = {
         "prompt": {
             "id": "pmpt_691df223bd3881909e4e9c544a56523b006e1332a5ce0f11",
-            "version": "1"
+            "version": "4"
         },
         "input": [
             {
