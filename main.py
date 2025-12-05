@@ -32,7 +32,7 @@ def debug(title, data=None):
     if data is not None:
         try:
             logger.info(json.dumps(data, indent=2, ensure_ascii=False))
-        except:
+        except Exception:
             logger.info(str(data))
     logger.info("="*70 + "\n")
 
@@ -41,8 +41,7 @@ def debug(title, data=None):
 # ===========================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# ASSISTANT_ID_PREMIUM لم نعد نحتاجه مع Responses/Prompts، موجود لو بتستخدمه في مكان تاني
-ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
+ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")  # احتياطي لو بتستخدمه في حتة تانية
 MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
@@ -67,15 +66,15 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 Flask و OpenAI جاهزين")
 
 # ===========================
-# متغيرات التحكم
+# متغيرات التحكم في الـ Queue
 # ===========================
 pending_messages = {"Facebook": {}, "Instagram": {}}
 message_timers = {"Facebook": {}, "Instagram": {}}
-run_locks = {"Facebook": {}, "Instagram": {}}
+run_locks = {"Facebook": {}, "Instagram": {}}  # Locks لكل يوزر للترتيب فقط
 queue_lock = threading.Lock()
 
 # وقت التجميع (ثانيتين كافية جداً)
-BATCH_WAIT_TIME = 2.0 
+BATCH_WAIT_TIME = 2.0
 RETRY_DELAY_WHEN_BUSY = 3.0
 
 # ===========================
@@ -120,7 +119,6 @@ async def get_image_description_for_assistant(base64_image):
             }],
             max_tokens=300
         )
-        # ملاحظة: قد تتغير البنية حسب نسخة الـ SDK؛ هنا نحاول الوصول إلى المحتوى
         try:
             return response.choices[0].message.content
         except Exception:
@@ -179,35 +177,35 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
             "last_name": contact_data.get("last_name"),
             "profile_pic": contact_data.get("profile_pic"),
         },
-        # Note: نعِد تخزين conversation id بدلاً من thread id
         "openai_conversation_id": None,
         "custom_fields": contact_data.get("custom_fields", {}),
         "tags": [f"source:{main_platform.lower()}"],
         "status": "active",
         "conversation_summary": "",
         "first_contact_date": now_utc,
-        "last_contact_date": now_utc
+        "last_contact_date": now_utc,
+        # حالة المساعد
+        "assistant_busy": False,
     }
 
     sessions_collection.insert_one(new_session)
     return new_session
 
 # ===========================
-# دالة إرسال إشارة "جاري الكتابة" (الحل السحري)
+# دالة إرسال إشارة "جاري الكتابة"
 # ===========================
 def send_typing_action(subscriber_id, platform):
     """
     بتبعت إشارة لـ ManyChat فوراً عشان "تفتح الشات" وتعرف العميل إننا موجودين.
     """
     debug("⚡ Sending Typing/Open Signal...", {"user": subscriber_id})
-    
+
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
         "Content-Type": "application/json"
     }
-    
-    # محاولة إرسال أكشن (Typing) لإنعاش المحادثة
+
     payload = {
         "subscriber_id": str(subscriber_id),
         "data": {
@@ -217,10 +215,10 @@ def send_typing_action(subscriber_id, platform):
             }
         }
     }
-    
+
     try:
         requests.post(url, headers=headers, data=json.dumps(payload), timeout=2)
-    except:
+    except Exception:
         pass
 
 # ===========================
@@ -266,45 +264,40 @@ async def get_assistant_reply_async(session, content):
         "reasoning": {"summary": "auto"}
     }
 
-    # إضافة Conversation ID لو موجود (لعمل سياق للمحادثة)
     if conversation_id:
         payload["conversation"] = conversation_id
 
     try:
-        # 3) تنفيذ الطلب بشكل Async
         response = await asyncio.to_thread(
             client.responses.create,
             **payload
         )
 
-        # 4) استخراج النص النهائي
         reply = None
 
-        # الطريقة الأساسية
         if hasattr(response, "output_text") and response.output_text:
             reply = response.output_text
 
-        # fallback في حال تغيّر الهيكل
         if not reply and hasattr(response, "output"):
             for item in response.output:
                 content_list = getattr(item, "content", None)
                 if content_list:
                     for c in content_list:
-                        if c.get("type") == "output_text":
+                        if isinstance(c, dict) and c.get("type") == "output_text":
                             reply = c.get("text", {}).get("value")
                             break
 
         if not reply:
             return "⚠️ حصل خطأ أثناء توليد الرد."
 
-        return reply.strip()
+        return str(reply).strip()
 
     except Exception as e:
         debug("❌ خطأ في Responses API", str(e))
         return "⚠️ حصل خطأ أثناء المعالجة."
 
 # ===========================
-# إرسال ManyChat (المحارب)
+# إرسال ManyChat
 # ===========================
 def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUMAN_AGENT"):
     debug("📤 Sending ManyChat Reply", {
@@ -314,7 +307,7 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
 
     channel = "instagram" if platform == "Instagram" else "facebook"
     url = "https://api.manychat.com/fb/sending/sendContent"
-    
+
     headers = {
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
         "Content-Type": "application/json"
@@ -337,26 +330,28 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
         if r.status_code == 200:
             debug("✅ Sent Normally", r.status_code)
             return {"ok": True}
+        else:
+            debug("⚠️ ManyChat Non-200", {"status": r.status_code, "body": r.text})
     except Exception as e:
         debug("❌ Network Error", str(e))
 
-    # 2. الهجوم بالتاجات
+    # 2. إعادة المحاولة مع التاجات
     debug("⚠️ Retry with FORCE TAGS...", "")
     tags_to_try = ["HUMAN_AGENT", "ACCOUNT_UPDATE", "CONFIRMED_EVENT_UPDATE"]
-    
+
     for tag in tags_to_try:
         payload_force = {
             "subscriber_id": str(subscriber_id),
             "channel": channel,
             "data": {
                 "version": "v2",
-                "message_tag": tag, 
+                "message_tag": tag,
                 "content": {
                     "messages": [
                         {
-                            "type": "text", 
+                            "type": "text",
                             "text": text_message,
-                            "tag": tag 
+                            "tag": tag
                         }
                     ]
                 }
@@ -367,10 +362,10 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
             if r2.status_code == 200:
                 debug(f"✅ Success with {tag}", r2.status_code)
                 return {"ok": True}
-        except:
-            pass
+        except Exception as e:
+            debug("❌ Force Tag Error", str(e))
 
-    # 3. Legacy
+    # 3. Legacy V1
     payload_v1 = {
         "subscriber_id": str(subscriber_id),
         "data": {
@@ -383,7 +378,7 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
     }
     try:
         requests.post(url, headers=headers, data=json.dumps(payload_v1), timeout=15)
-    except:
+    except Exception:
         pass
 
     return {"ok": False}
@@ -392,28 +387,55 @@ def send_manychat_reply(subscriber_id, text_message, platform, fallback_tag="HUM
 # Queue System
 # ===========================
 def schedule_assistant_response(platform, user_id):
+    """
+    تشغيل الرد الفعلي للمساعد من الكيو لمستخدم واحد.
+    هنا نستخدم:
+      - run_locks للترتيب فقط (منع Race داخل نفس الـ Thread)
+      - assistant_busy في MongoDB لمعرفة هل المساعد شغال فعلياً ولا لأ
+    """
     debug("⚙ Queue Run Started", {"platform": platform, "user": user_id})
 
     lock = run_locks[platform].setdefault(user_id, threading.Lock())
 
-    if not lock.acquire(blocking=False):
-        debug("⏳ Assistant Busy – Retrying", {"user": user_id})
-        threading.Timer(RETRY_DELAY_WHEN_BUSY, schedule_assistant_response, args=[platform, user_id]).start()
-        return
+    # نخلي التنفيذ نفسه جوه الـ Lock علشان متحصلش Race
+    with lock:
+        # 1) نجيب السيشن من DB
+        session = sessions_collection.find_one({"_id": user_id})
+        if not session:
+            debug("⚠️ Session Not Found For User", user_id)
+            return
 
-    try:
+        # 2) لو المساعد مشغول فعلاً → نأجل التنفيذ
+        if session.get("assistant_busy") is True:
+            debug("⏳ Assistant Busy (DB State) – Retrying", {"user": user_id})
+            threading.Timer(RETRY_DELAY_WHEN_BUSY, schedule_assistant_response, args=[platform, user_id]).start()
+            return
+
+        # 3) نعتبر المساعد مشغول من اللحظة دي (لحد ما نخلص الرد)
+        sessions_collection.update_one(
+            {"_id": user_id},
+            {"$set": {"assistant_busy": True}}
+        )
+
+        # 4) نجمع الرسائل من الكيو
         with queue_lock:
             data = pending_messages[platform].pop(user_id, None)
-            message_timers[platform].pop(user_id, None)
+            timer = message_timers[platform].pop(user_id, None)
 
         if not data:
+            # مفيش بيانات نرد عليها → نفك حالة الانشغال
+            sessions_collection.update_one(
+                {"_id": user_id},
+                {"$set": {"assistant_busy": False}}
+            )
+            debug("⚠️ No Pending Data For User", user_id)
             return
 
         session = data["session"]
         merged = "\n".join(data["texts"])
-
         debug("📝 MERGED USER MESSAGES", merged)
 
+        # 5) نطلب الرد من OpenAI
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -421,10 +443,15 @@ def schedule_assistant_response(platform, user_id):
         finally:
             loop.close()
 
+        # 6) نبعت الرد لـ ManyChat
         send_manychat_reply(user_id, reply, session["platform"])
 
-    finally:
-        lock.release()
+        # 7) بعد ما خلصنا الرد → المساعد جاهز يستقبل جديد
+        sessions_collection.update_one(
+            {"_id": user_id},
+            {"$set": {"assistant_busy": False}}
+        )
+        debug("✅ Assistant Finished For User", user_id)
 
 def add_to_queue(session, text):
     platform = session["platform"]
@@ -437,25 +464,25 @@ def add_to_queue(session, text):
     })
 
     with queue_lock:
-        # ========================================================
-        # اللمسة السحرية: لو دي أول رسالة، ابعت "إشارة" لماني شات فوراً
-        # ========================================================
+        # أول رسالة للمستخدم في هذه الدفعة → ابعت إشارة typing
         if uid not in pending_messages[platform]:
-            # بنشغلها في ثريد عشان متعطلش الكود
             threading.Thread(target=send_typing_action, args=(uid, platform)).start()
+            pending_messages[platform][uid] = {"texts": [], "session": session}
 
+        # تأكيد وجود entry
         if uid not in pending_messages[platform]:
             pending_messages[platform][uid] = {"texts": [], "session": session}
 
         pending_messages[platform][uid]["texts"].append(text)
 
+        # لو فيه تايمر سابق → نلغيه
         if uid in message_timers[platform]:
             try:
                 message_timers[platform][uid].cancel()
-            except:
+            except Exception:
                 pass
 
-        # التايمر للتجميع (2 ثانية)
+        # نحدد تايمر جديد للتشغيل بعد BATCH_WAIT_TIME
         timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[platform, uid])
         message_timers[platform][uid] = timer
         timer.start()
@@ -488,8 +515,8 @@ def mc_webhook():
     user_id = str(contact.get("id"))
     existing_session = sessions_collection.find_one({"_id": user_id})
 
-    # حماية إنستغرام
-    if existing_session and existing_session["platform"] == "Instagram" and not contact.get("ig_id"):
+    # حماية إنستغرام: لو السيشن مسجلة Instagram والـ contact مفيهوش ig_id → نتجاهل
+    if existing_session and existing_session.get("platform") == "Instagram" and not contact.get("ig_id"):
         debug("⛔ IG BLOCK TRIGGERED", "No IG ID")
         return jsonify({"ignored": True}), 200
 
@@ -515,7 +542,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running with INSTANT SIGNAL & Responses/Conversations"
+    return "Bot running with INSTANT SIGNAL & Responses/Conversations & Stable Queue"
 
 # ===========================
 # Run
