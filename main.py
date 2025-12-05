@@ -21,7 +21,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-logger.info("▶️ بدء تشغيل التطبيق (نسخة رد الفعل السريع)...")
+logger.info("▶️ بدء تشغيل التطبيق (نسخة Responses + Conversations)...")
 
 # ===========================
 # DEBUG
@@ -41,6 +41,7 @@ def debug(title, data=None):
 # ===========================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ASSISTANT_ID_PREMIUM لم نعد نحتاجه مع Responses/Prompts، موجود لو بتستخدمه في مكان تاني
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
@@ -119,7 +120,11 @@ async def get_image_description_for_assistant(base64_image):
             }],
             max_tokens=300
         )
-        return response.choices[0].message.content
+        # ملاحظة: قد تتغير البنية حسب نسخة الـ SDK؛ هنا نحاول الوصول إلى المحتوى
+        try:
+            return response.choices[0].message.content
+        except Exception:
+            return getattr(response, "output_text", None)
     except Exception as e:
         debug("❌ خطأ رؤية الصورة", str(e))
         return None
@@ -174,7 +179,8 @@ def get_or_create_session_from_contact(contact_data, platform_hint=None):
             "last_name": contact_data.get("last_name"),
             "profile_pic": contact_data.get("profile_pic"),
         },
-        "openai_thread_id": None,
+        # Note: نعِد تخزين conversation id بدلاً من thread id
+        "openai_conversation_id": None,
         "custom_fields": contact_data.get("custom_fields", {}),
         "tags": [f"source:{main_platform.lower()}"],
         "status": "active",
@@ -202,69 +208,122 @@ def send_typing_action(subscriber_id, platform):
     }
     
     # محاولة إرسال أكشن (Typing) لإنعاش المحادثة
-    # ملاحظة: حتى لو ماني شات مردش عليها، مجرد الطلب بيصحصح السيرفر
     payload = {
         "subscriber_id": str(subscriber_id),
         "data": {
             "version": "v2",
             "content": {
-                "type": "typing_on" # محاولة إظهار "جاري الكتابة"
+                "type": "typing_on"
             }
         }
     }
     
     try:
-        # بنبعت الطلب ونتجاهل الرد عشان منضيعش وقت
         requests.post(url, headers=headers, data=json.dumps(payload), timeout=2)
     except:
         pass
 
 # ===========================
-# OpenAI Assistant
+# OpenAI Assistant (Responses + Conversations)
 # ===========================
 async def get_assistant_reply_async(session, content):
-    debug("🤖 Assistant Processing", {"user": session["_id"]})
+    debug("🤖 Responses+Conversations Processing", {"user": session["_id"]})
 
     user_id = session["_id"]
-    thread_id = session.get("openai_thread_id")
+    conversation_id = session.get("openai_conversation_id")
 
-    if not thread_id:
-        thread = await asyncio.to_thread(client.beta.threads.create)
-        thread_id = thread.id
-        sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
+    # 1) لو مفيش Conversation: أنشئ واحد
+    if not conversation_id:
+        try:
+            conv = await asyncio.to_thread(
+                client.conversations.create,
+                items=[],  # ننشئ محادثة فاضية في البداية
+                metadata={"user_id": user_id}
+            )
+            conversation_id = conv.id
+            sessions_collection.update_one(
+                {"_id": user_id},
+                {"$set": {"openai_conversation_id": conversation_id}}
+            )
+            debug("✅ Created new conversation", {"conversation_id": conversation_id})
+        except Exception as e:
+            debug("❌ Failed to create conversation", str(e))
+            # محاولة المتابعة بدون conversation (fallback)
+            conversation_id = None
 
-    await asyncio.to_thread(
-        client.beta.threads.messages.create,
-        thread_id=thread_id,
-        role="user",
-        content=content
-    )
+    # 2) بناء payload للـ Responses API باستخدام الـ prompt اللي انت محدده
+    payload = {
+        "model": "gpt-4.1",   # تأكد لو عايز موديل مختلف غيّره هنا
+        "prompt": {
+            "id": "pmpt_691df223bd3881909e4e9c544a56523b006e1332a5ce0f11",
+            "version": "1"
+        },
+        "input": [
+            {
+                "role": "user",
+                "content": content
+            }
+        ],
+        "reasoning": {"summary": "auto"},
+        "store": True,
+        "include": [
+            "reasoning.encrypted_content",
+            "web_search_call.action.sources"
+        ]
+    }
 
-    run = await asyncio.to_thread(
-        client.beta.threads.runs.create,
-        thread_id=thread_id,
-        assistant_id=ASSISTANT_ID_PREMIUM
-    )
+    # أضف conversation إذا متاح (هذا يضمن السياق وذاكرة المحادثة)
+    if conversation_id:
+        payload["conversation"] = conversation_id
 
-    while run.status in ["in_progress", "queued"]:
-        await asyncio.sleep(1)
-        run = await asyncio.to_thread(
-            client.beta.threads.runs.retrieve,
-            thread_id=thread_id,
-            run_id=run.id
-        )
+    try:
+        # 3) استدعاء Responses API بشكل متوافق مع asyncio
+        response = await asyncio.to_thread(client.responses.create, **payload)
 
-    if run.status != "completed":
-        debug("❌ RUN FAILED", run.status)
-        return "⚠️ حصل خطأ."
+        # 4) استخراج النص النهائي بطريقة متوافقة مع SDK
+        reply = None
+        # حاول الطرق المختلفة لاستخراج النص (تعتمد على SDK وإصدارها)
+        if hasattr(response, "output_text") and response.output_text:
+            reply = response.output_text
+        else:
+            # response.output قد يحتوي على items
+            try:
+                output_items = getattr(response, "output", None) or []
+                # نحاول إيجاد أول item من النوع text
+                if isinstance(output_items, list) and len(output_items) > 0:
+                    first = output_items[0]
+                    # المحتوى داخل first.get("content") أو first.content
+                    content_list = first.get("content") if isinstance(first, dict) else getattr(first, "content", None)
+                    if content_list:
+                        # ابحث عن content item من نوع output_text
+                        for c in content_list:
+                            # c قد يكون dict أو object حسب SDK
+                            ctype = c.get("type") if isinstance(c, dict) else getattr(c, "type", None)
+                            if ctype == "output_text" or ctype == "message":
+                                text = c.get("text") if isinstance(c, dict) else getattr(c, "text", None)
+                                if isinstance(text, dict):
+                                    # هيكلة قد تكون {"value": "..."}
+                                    val = text.get("value") or text.get("text") or None
+                                else:
+                                    val = text
+                                if val:
+                                    reply = val
+                                    break
+                # آخر محاولة: response.text أو response.output[0].text
+                if not reply:
+                    reply = getattr(response, "text", None) or None
+            except Exception:
+                reply = None
 
-    msgs = await asyncio.to_thread(
-        client.beta.threads.messages.list,
-        thread_id=thread_id,
-        limit=1
-    )
-    reply = msgs.data[0].content[0].text.value.strip()
-    return reply
+        if not reply:
+            debug("⚠️ Empty reply — full response object", {"response": str(response)})
+            return "⚠️ حصل خطأ أثناء توليد الرد."
+
+        return reply.strip()
+
+    except Exception as e:
+        debug("❌ Responses API Error", str(e))
+        return "⚠️ حصل خطأ أثناء المعالجة."
 
 # ===========================
 # إرسال ManyChat (المحارب)
@@ -478,7 +537,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running with INSTANT SIGNAL & WARRIOR SENDING"
+    return "Bot running with INSTANT SIGNAL & Responses/Conversations"
 
 # ===========================
 # Run
