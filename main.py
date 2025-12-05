@@ -80,8 +80,8 @@ run_locks = {"Facebook": {}, "Instagram": {}}
 queue_lock = threading.Lock()
 
 # وقت التجميع (ثانيتين كافية جداً)
-BATCH_WAIT_TIME = 2.0
-RETRY_DELAY_WHEN_BUSY = 2.5
+BATCH_WAIT_TIME = 8.0
+RETRY_DELAY_WHEN_BUSY = 6.5
 
 # ===========================
 # Utilities
@@ -262,7 +262,7 @@ async def get_assistant_reply_async(session, content_text):
     payload = {
         "prompt": {
             "id": "pmpt_691df223bd3881909e4e9c544a56523b006e1332a5ce0f11",
-            "version": "4"
+            "version": "5"
         },
         "input": [
             {
